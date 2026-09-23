@@ -96,8 +96,34 @@ class CoreLogicTest {
         assertTrue(!soup.contains("<"))
         assertTrue(!soup.contains("recindex"))
 
+        val shot = HtmlText.toPlain("\uFFFD\"00139\" alt=\"第 138 頁\"/>\n\n<mbp:pa")
+        assertTrue(shot.isBlank())
+        assertNoTagSoup(shot)
+
+        val broken = HtmlText.toPlain(
+            "<p>第一章 潮水很深，船还在江心。</p>\n\uFFFD\"00139\" alt=\"第138章 假标题\"/>\n<mbp:pa\n<p>后文还在。</p>",
+        )
+        assertTrue(broken.contains("潮水"))
+        assertTrue(broken.contains("后文还在"))
+        assertTrue(!broken.contains("假标题"))
+        assertTrue(!broken.contains("00139"))
+        assertTrue(!broken.contains("\uFFFD"))
+        assertNoTagSoup(broken)
+
+        val code = HtmlText.toPlain("<p>see #include &lt;mobi.h&gt; end</p>")
+        assertTrue(code.contains("#include <mobi.h>"))
+
         val names = listOf("page10.jpg", "page2.jpg", "page1.jpg").sortedWith(NaturalSort)
         assertEquals(listOf("page1.jpg", "page2.jpg", "page10.jpg"), names)
+    }
+
+    private fun assertNoTagSoup(text: String) {
+        assertTrue(text, !text.contains("alt="))
+        assertTrue(text, !text.contains("mbp:"))
+        assertTrue(text, !text.contains("recindex"))
+        assertTrue(text, !text.contains("<"))
+        assertTrue(text, !text.contains("/>"))
+        assertTrue(text, !text.contains("\uFFFD"))
     }
 
     @Test

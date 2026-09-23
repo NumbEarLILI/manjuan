@@ -30,18 +30,22 @@ object HtmlText {
     }
 
     fun toPlain(html: String): String {
-        var text = html
+        var text = html.replace("\uFFFD", "")
+        text = text.replace(Regex("""(?i)"\d{3,6}"\s*alt\s*=\s*"[^"]*"\s*/?>?"""), " ")
+        text = text.replace(Regex("""(?i)"\d{3,6}"\s*alt\s*=\s*'[^']*'\s*/?>?"""), " ")
         text = text.replace(Regex("(?is)<(script|style|guide)\\b[^>]*>.*?</\\1>"), " ")
         text = text.replace(Regex("(?i)<br\\s*/?>"), "\n")
         text = text.replace(Regex("(?i)</(p|div|h[1-6]|li|tr|blockquote)>"), "\n")
         text = text.replace(Regex("(?is)<[^>]+>"), " ")
-        text = text.replace(Regex("(?i)<img\\b[^>]{0,240}"), " ")
+        text = text.replace(Regex("(?i)<img\\b[^>\\n]{0,240}"), " ")
         text = text.replace(Regex("(?i)</?mbp:[^>\\s]{0,80}"), " ")
         text = text.replace(Regex("(?i)\\bmbp:[a-z0-9:_-]*"), " ")
         text = text.replace(Regex("(?i)\\balt\\s*=\\s*\"[^\"]*\""), " ")
         text = text.replace(Regex("(?i)\\balt\\s*=\\s*'[^']*'"), " ")
         text = text.replace(Regex("(?i)\\balt\\s*=\\s*[^\\s\"'<>]*"), " ")
         text = text.replace(Regex("(?i)\\b(?:recindex|filepos)\\s*=\\s*(?:\"[^\"]*\"|'[^']*'|\\S*)"), " ")
+        text = text.replace(Regex("""(?i)"\d{3,6}"\s*/?>"""), " ")
+        text = text.replace("/>", " ")
         text = unescape(text)
         text = text.replace('\u00A0', ' ')
         text = text.replace(Regex("[ \\t\\u3000]+"), " ")

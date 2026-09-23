@@ -54,17 +54,17 @@ object MobiParser {
                 }
             }
         }
-        val html = best?.html ?: markupHtml
         val headerIndex = best?.headerIndex ?: markupHeader
         val images = collectImages(bytes, offsets, headerIndex)
-        val pictureBook = isPictureBook(best?.score ?: 0, html)
-        if (pictureBook) return Opening(null, images, true)
-        best?.takeIf { it.score >= MIN_READABLE }?.let { return Opening(it.toNovel(), images, false) }
+        val letters = best?.score ?: 0
+        if (letters >= MIN_READABLE) return Opening(best!!.toNovel(), images, false)
         if (sawHuff) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
         if (sawEncrypted) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
+        // Comic only when almost no prose remains and there is a real page run.
+        if (images.size >= 3) return Opening(null, images, true)
         if (sawUndecodable) throw UnsupportedBookException("无法解码这本 MOBI 的正文")
         primaryStop?.let { throw it }
-        throw UnsupportedBookException("没有从 MOBI 中提取到正文")
+        return Opening(null, images, false)
     }
 
     fun parse(file: File): NovelContent {
@@ -87,11 +87,6 @@ object MobiParser {
             throw UnsupportedBookException("这本 MOBI 是图片页，但没有解出可显示的图片")
         }
         return opening.images
-    }
-
-    private fun isPictureBook(letters: Int, html: String): Boolean {
-        if (letters >= MIN_READABLE) return false
-        return Regex("(?i)<img\\b").containsMatchIn(html) || Regex("(?i)<image\\b").containsMatchIn(html)
     }
 
     /**
@@ -275,7 +270,7 @@ object MobiParser {
                 continue
             }
             val image = ImageSniff.extract(record) ?: if (images.isNotEmpty()) break else continue
-            if (images.none { it.contentEquals(image) }) images += image
+            images += image
         }
         return images
     }
