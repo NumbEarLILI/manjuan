@@ -431,10 +431,13 @@ class LibraryRepository(
                 else -> throw UnsupportedBookException("这个文件不能当小说打开")
             }
             val stored = database.books().get(book.id) ?: book
+            val kind = resolved.format.kind()?.name ?: stored.kind
             database.books().update(
                 stored.copy(
                     title = content.title.ifBlank { stored.title },
                     author = content.author.ifBlank { stored.author },
+                    format = resolved.format.name,
+                    kind = kind,
                     lastOpenedAt = System.currentTimeMillis(),
                 ),
             )

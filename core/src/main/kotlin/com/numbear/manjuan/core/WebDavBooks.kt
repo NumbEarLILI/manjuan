@@ -63,6 +63,7 @@ object WebDavBooks {
         val classified = classify(title, remotePath.ifBlank { location }, directory = false, header)
         if (classified.format.kind() == BookKind.COMIC) return classified
         if (stored == BookFormat.PDF || classified.format == BookFormat.PDF) return Detection(BookFormat.PDF)
+        if (classified.format == BookFormat.MOBI || classified.format == BookFormat.AZW3) return classified
         if (stored.kind() == BookKind.NOVEL) return Detection(stored)
         if (kindName.equals("COMIC", ignoreCase = true)) {
             return Detection(if (stored.kind() == BookKind.COMIC) stored else BookFormat.ZIP_IMAGES)
