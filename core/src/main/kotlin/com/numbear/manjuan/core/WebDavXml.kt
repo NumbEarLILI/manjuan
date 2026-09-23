@@ -5,12 +5,19 @@ import org.w3c.dom.Node
 import java.net.URLDecoder
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.parsers.ParserConfigurationException
 
 object WebDavXml {
     fun parse(xml: String, requestPath: String): List<WebDavEntry> {
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = true
-        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+        // Desktop JREs honor this. Android's DocumentBuilderFactory rejects it on every
+        // API level (ParserConfigurationException). Listing must still parse the PROPFIND
+        // body; otherwise browse-after-save is reported as 「无法连接服务器」.
+        try {
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+        } catch (_: ParserConfigurationException) {
+        }
         val document = factory.newDocumentBuilder().parse(xml.byteInputStream(Charsets.UTF_8))
         val responses = document.documentElement.elementsByLocal("response")
             .filter { it.parentNode == document.documentElement || it.localName.equals("response", true) }
