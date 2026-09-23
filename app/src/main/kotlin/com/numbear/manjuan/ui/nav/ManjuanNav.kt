@@ -34,7 +34,12 @@ fun ManjuanNav() {
         composable("add") {
             AddScreen(onBack = { nav.popBackStack() }, onBrowse = { id -> nav.navigate("browse/$id") })
         }
-        composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }) }
+        composable("settings") {
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onBrowse = { id -> nav.navigate("browse/$id") },
+            )
+        }
         composable("browse/{sourceId}") { entry ->
             val sourceId = entry.arguments?.getString("sourceId")?.toLongOrNull() ?: 0L
             WebDavBrowseScreen(sourceId, onBack = { nav.popBackStack() })

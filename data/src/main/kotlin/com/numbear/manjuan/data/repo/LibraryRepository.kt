@@ -2,14 +2,17 @@ package com.numbear.manjuan.data.repo
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import androidx.documentfile.provider.DocumentFile
 import com.numbear.manjuan.core.BookFormat
 import com.numbear.manjuan.core.BookKind
 import com.numbear.manjuan.core.CbrExtractor
 import com.numbear.manjuan.core.EpubParser
+import com.numbear.manjuan.core.FolderImport
 import com.numbear.manjuan.core.FormatDetector
+import com.numbear.manjuan.core.LibraryNames
 import com.numbear.manjuan.core.MobiParser
 import com.numbear.manjuan.core.NovelChapter
 import com.numbear.manjuan.core.NovelContent
@@ -20,9 +23,13 @@ import com.numbear.manjuan.core.TextEncoding
 import com.numbear.manjuan.core.TxtChapters
 import com.numbear.manjuan.core.UnsupportedBookException
 import com.numbear.manjuan.core.WebDavEntry
+import com.numbear.manjuan.core.WebDavScan
 import com.numbear.manjuan.core.WebDavStatus
 import com.numbear.manjuan.core.ZipImages
 import com.numbear.manjuan.core.kind
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import com.numbear.manjuan.data.crypto.WebDavCipher
 import com.numbear.manjuan.data.db.BookEntity
 import com.numbear.manjuan.data.db.BookmarkEntity
@@ -75,50 +82,59 @@ class LibraryRepository(
         } catch (_: SecurityException) {
             // The picker still grants a temporary permission for this call.
         }
-        val root = DocumentFile.fromTreeUri(context, uri)
-            ?: return@withContext ImportReport(0, listOf("无法打开所选文件夹"))
+        val rootId = try {
+            DocumentsContract.getTreeDocumentId(uri)
+        } catch (_: Exception) {
+            return@withContext ImportReport(0, listOf("无法打开所选文件夹"))
+        }
         val sourceId = ensureLocalSource()
         val errors = ArrayList<String>()
         var added = 0
-        suspend fun walk(doc: DocumentFile) {
-            val children = doc.listFiles().toList()
-            val files = children.filter { it.isFile }
-            val dirs = children.filter { it.isDirectory }
-            val books = files.filter { FormatDetector.extension(it.name ?: "") in FormatDetector.bookExtensions }
-            val images = files.filter { FormatDetector.isImageName(it.name ?: "") }
-            if (books.isNotEmpty()) {
-                books.forEach { file ->
-                    val name = file.name ?: "未命名"
-                    try {
-                        importLocalFile(sourceId, name, file.uri)
-                        added++
-                    } catch (error: UnsupportedBookException) {
-                        errors += "$name：${error.message}"
-                    } catch (_: Exception) {
-                        errors += "$name：无法读取文件"
-                    }
-                }
-                dirs.forEach { walk(it) }
-            } else if (images.isNotEmpty() && dirs.isEmpty()) {
+        val visited = HashSet<String>()
+        fun note(message: String) = errors.noteCapped(message)
+        // DocumentFile.listFiles() stays shallow or empty on some SAF providers.
+        // DocumentsContract child queries follow the granted tree, including nested folders.
+        suspend fun walk(documentId: String, displayName: String, depth: Int) {
+            if (!visited.add(documentId)) return
+            val children = listSafChildren(uri, documentId)
+            if (children == null) {
+                note("$displayName：无法读取文件夹")
+                return
+            }
+            val plan = FolderImport.plan(
+                children = children,
+                depth = depth,
+                nameOf = { it.name },
+                isDirectory = { it.directory },
+            )
+            plan.books.forEach { file ->
+                val name = file.name.ifBlank { "未命名" }
                 try {
-                    importImageFolder(sourceId, doc.name ?: "图片文件夹", uri, doc)
+                    val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, file.documentId)
+                    importLocalFile(sourceId, name, docUri)
                     added++
                 } catch (error: UnsupportedBookException) {
-                    errors += "${doc.name}：${error.message}"
+                    note("$name：${error.message}")
+                } catch (_: Exception) {
+                    note("$name：无法读取文件")
                 }
-            } else if (images.isNotEmpty()) {
+            }
+            if (plan.imageFolder) {
+                val title = displayName.ifBlank { "图片文件夹" }
                 try {
-                    importImageFolder(sourceId, doc.name ?: "图片文件夹", uri, doc)
+                    importImageFolder(sourceId, title, uri, documentId)
                     added++
                 } catch (error: UnsupportedBookException) {
-                    errors += "${doc.name}：${error.message}"
+                    note("$title：${error.message}")
+                } catch (_: Exception) {
+                    note("$title：无法加入")
                 }
-                dirs.forEach { walk(it) }
-            } else {
-                dirs.forEach { walk(it) }
+            }
+            plan.directories.forEach { dir ->
+                walk(dir.documentId, dir.name.ifBlank { "文件夹" }, depth + 1)
             }
         }
-        walk(root)
+        walk(rootId, queryDisplayName(uri, rootId) ?: "所选文件夹", 0)
         if (added == 0 && errors.isEmpty()) {
             errors += "文件夹里没有支持的小说、漫画或图片"
         }
@@ -147,6 +163,29 @@ class LibraryRepository(
         )
     }
 
+    suspend fun updateWebDav(
+        id: Long,
+        name: String,
+        url: String,
+        username: String,
+        password: String,
+        root: String,
+    ) = withContext(Dispatchers.IO) {
+        val existing = database.sources().get(id) ?: throw UnsupportedBookException("找不到 WebDAV 账号")
+        val secret = if (password.isNotEmpty()) password else cipher.decrypt(existing.passwordCipher)
+        val status = testWebDav(url, username, secret, root)
+        if (status is WebDavStatus.Failed) throw UnsupportedBookException(status.message)
+        database.sources().update(
+            existing.copy(
+                displayName = name.ifBlank { url.trim() },
+                baseUrl = url.trim(),
+                username = username,
+                passwordCipher = if (password.isEmpty()) existing.passwordCipher else cipher.encrypt(password),
+                rootPath = root.trim(),
+            ),
+        )
+    }
+
     suspend fun testWebDav(url: String, username: String, password: String, root: String): WebDavStatus =
         withContext(Dispatchers.IO) {
             if (!url.trim().startsWith("http://") && !url.trim().startsWith("https://")) {
@@ -155,36 +194,102 @@ class LibraryRepository(
             client(url, username, password, root).test()
         }
 
+    suspend fun testWebDavAccount(
+        existingId: Long?,
+        url: String,
+        username: String,
+        password: String,
+        root: String,
+    ): WebDavStatus = withContext(Dispatchers.IO) {
+        val secret = if (existingId == null || password.isNotEmpty()) {
+            password
+        } else {
+            val existing = database.sources().get(existingId)
+                ?: return@withContext WebDavStatus.Failed("找不到 WebDAV 账号")
+            cipher.decrypt(existing.passwordCipher)
+        }
+        testWebDav(url, username, secret, root)
+    }
+
     suspend fun listWebDav(sourceId: Long, path: String): List<WebDavEntry> = withContext(Dispatchers.IO) {
         client(requireSource(sourceId)).list(path)
     }
 
-    suspend fun addRemote(sourceId: Long, entry: WebDavEntry): Long = withContext(Dispatchers.IO) {
-        val existing = database.books().findRemote(sourceId, entry.path)
-        if (existing != null) return@withContext existing.id
-        val format = if (entry.directory) {
-            BookFormat.IMAGE_FOLDER
-        } else {
-            val header = client(requireSource(sourceId)).peek(entry.path)
-            val detection = FormatDetector.detectFile(entry.name, header)
-            if (detection.format == BookFormat.UNSUPPORTED) {
-                throw UnsupportedBookException(detection.error ?: "不支持的格式：${entry.name}")
-            }
-            detection.format
+    suspend fun scanWebDav(
+        sourceId: Long,
+        path: String,
+        onProgress: (RemoteScanProgress) -> Unit = {},
+    ): RemoteScanReport = withContext(Dispatchers.IO) {
+        val remote = client(requireSource(sourceId))
+        val errors = ArrayList<String>()
+        val books = ArrayList<WebDavEntry>()
+        var errorCount = 0
+        val job = coroutineContext[Job]
+        fun note(message: String) {
+            errorCount++
+            errors.noteCapped(message)
         }
-        val kind = format.kind() ?: throw UnsupportedBookException("不支持的格式：${entry.name}")
-        database.books().insert(
-            BookEntity(
-                sourceId = sourceId,
-                title = entry.name.substringBeforeLast('.').ifBlank { entry.name },
-                format = format.name,
-                kind = kind.name,
-                location = entry.path,
-                remotePath = entry.path,
-                addedAt = System.currentTimeMillis(),
-                sizeBytes = entry.size,
-            ),
+        fun publish(imported: Int, skipped: Int, current: String) {
+            publishScan(
+                onProgress,
+                RemoteScanProgress(books.size, imported, skipped, errorCount, current),
+            )
+        }
+        fun checkActive() {
+            if (job?.isActive == false) throw CancellationException()
+        }
+        WebDavScan.forEachBook(
+            startPath = path,
+            isActive = { job?.isActive != false },
+            list = { folder ->
+                checkActive()
+                try {
+                    remote.list(folder)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    val label = folder.trim().trimEnd('/').substringAfterLast('/').ifBlank { "当前目录" }
+                    note("$label：${error.message ?: "无法列出目录"}")
+                    publish(0, 0, label)
+                    emptyList()
+                }
+            },
+            onDirectory = { folder ->
+                val label = folder.trim().trimEnd('/').substringAfterLast('/').ifBlank { "当前目录" }
+                publish(0, 0, label)
+            },
+            onBook = { entry ->
+                checkActive()
+                books += entry
+                publish(0, 0, entry.name)
+            },
         )
+        var imported = 0
+        var skipped = 0
+        for (entry in books) {
+            coroutineContext.ensureActive()
+            try {
+                when (insertRemote(sourceId, entry)) {
+                    is RemoteInsert.Created -> imported++
+                    is RemoteInsert.Existing -> skipped++
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: UnsupportedBookException) {
+                note("${entry.name}：${error.message}")
+            } catch (_: Exception) {
+                note("${entry.name}：无法导入")
+            }
+            publish(imported, skipped, entry.name)
+        }
+        RemoteScanReport(books.size, imported, skipped, errors.toList())
+    }
+
+    suspend fun addRemote(sourceId: Long, entry: WebDavEntry): Long = withContext(Dispatchers.IO) {
+        when (val result = insertRemote(sourceId, entry)) {
+            is RemoteInsert.Created -> result.id
+            is RemoteInsert.Existing -> result.id
+        }
     }
 
     suspend fun cacheBook(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }) = withContext(Dispatchers.IO) {
@@ -374,12 +479,7 @@ class LibraryRepository(
         )
     }
 
-    private suspend fun importImageFolder(sourceId: Long, name: String, treeUri: Uri, folder: DocumentFile) {
-        val documentId = try {
-            DocumentsContract.getDocumentId(folder.uri)
-        } catch (_: Exception) {
-            DocumentsContract.getTreeDocumentId(treeUri)
-        }
+    private suspend fun importImageFolder(sourceId: Long, name: String, treeUri: Uri, documentId: String) {
         database.books().insert(
             BookEntity(
                 sourceId = sourceId,
@@ -390,6 +490,131 @@ class LibraryRepository(
                 addedAt = System.currentTimeMillis(),
             ),
         )
+    }
+
+    private suspend fun insertRemote(sourceId: Long, entry: WebDavEntry): RemoteInsert {
+        val existing = database.books().findRemote(sourceId, entry.path)
+        if (existing != null) return RemoteInsert.Existing(existing.id)
+        val format = if (entry.directory) {
+            BookFormat.IMAGE_FOLDER
+        } else {
+            val header = client(requireSource(sourceId)).peek(entry.path)
+            val detection = FormatDetector.detectFile(entry.name, header)
+            if (detection.format == BookFormat.UNSUPPORTED) {
+                throw UnsupportedBookException(detection.error ?: "不支持的格式：${entry.name}")
+            }
+            detection.format
+        }
+        val kind = format.kind() ?: throw UnsupportedBookException("不支持的格式：${entry.name}")
+        val id = database.books().insert(
+            BookEntity(
+                sourceId = sourceId,
+                title = entry.name.substringBeforeLast('.').ifBlank { entry.name },
+                format = format.name,
+                kind = kind.name,
+                location = entry.path,
+                remotePath = entry.path,
+                addedAt = System.currentTimeMillis(),
+                sizeBytes = entry.size,
+            ),
+        )
+        return RemoteInsert.Created(id)
+    }
+
+    private data class SafNode(
+        val documentId: String,
+        val name: String,
+        val directory: Boolean,
+        val mime: String,
+    )
+
+    private fun listSafChildren(treeUri: Uri, documentId: String): List<SafNode>? {
+        val raw = querySafChildren(treeUri, documentId) ?: return null
+        return raw.map { node ->
+            if (node.directory || LibraryNames.isJunk(node.name)) return@map node
+            val knownFile = LibraryNames.isBookFile(node.name) || FormatDetector.isImageName(node.name)
+            val ambiguous = node.mime.isBlank() || node.mime.equals("application/octet-stream", ignoreCase = true)
+            if (!ambiguous || knownFile) return@map node
+            val nested = querySafChildren(treeUri, node.documentId)
+            if (!nested.isNullOrEmpty()) node.copy(directory = true) else node
+        }
+    }
+
+    private fun querySafChildren(treeUri: Uri, documentId: String): List<SafNode>? {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+        val cursor = try {
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_FLAGS,
+                ),
+                null,
+                null,
+                null,
+            )
+        } catch (_: Exception) {
+            return null
+        } ?: return null
+        return cursor.use {
+            val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            val flagsIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_FLAGS)
+            if (idIndex < 0) return emptyList()
+            val nodes = ArrayList<SafNode>()
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(idIndex) ?: continue
+                val rawName = if (nameIndex >= 0) cursor.getString(nameIndex).orEmpty() else ""
+                val name = rawName.ifBlank { id.substringAfterLast(':').substringAfterLast('/') }
+                val mime = if (mimeIndex >= 0) cursor.getString(mimeIndex).orEmpty() else ""
+                val flags = if (flagsIndex >= 0 && !cursor.isNull(flagsIndex)) cursor.getInt(flagsIndex) else 0
+                nodes += SafNode(id, name, looksLikeDirectory(mime, flags), mime)
+            }
+            nodes
+        }
+    }
+
+    private fun queryDisplayName(treeUri: Uri, documentId: String): String? {
+        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+        return try {
+            context.contentResolver.query(
+                docUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val index = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun looksLikeDirectory(mime: String, flags: Int): Boolean {
+        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) return true
+        if (mime.equals("application/vnd.google-apps.folder", ignoreCase = true)) return true
+        if (mime.endsWith("/directory", ignoreCase = true) || mime.endsWith("/folder", ignoreCase = true)) return true
+        val dirFlags = DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE or
+            DocumentsContract.Document.FLAG_DIR_PREFERS_GRID
+        return flags and dirFlags != 0
+    }
+
+    private fun publishScan(onProgress: (RemoteScanProgress) -> Unit, progress: RemoteScanProgress) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            onProgress(progress)
+        } else {
+            Handler(Looper.getMainLooper()).post { onProgress(progress) }
+        }
+    }
+
+    private sealed class RemoteInsert {
+        data class Created(val id: Long) : RemoteInsert()
+        data class Existing(val id: Long) : RemoteInsert()
     }
 
     private fun listSafImages(location: String): List<Uri> {
@@ -524,5 +749,13 @@ class LibraryRepository(
     companion object {
         const val LOCAL = "LOCAL"
         const val WEBDAV = "WEBDAV"
+    }
+}
+
+private fun MutableList<String>.noteCapped(message: String) {
+    if (size < 40) {
+        add(message)
+    } else if (lastOrNull() != "其余错误已省略") {
+        add("其余错误已省略")
     }
 }

@@ -20,7 +20,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -33,15 +32,14 @@ import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.ManjuanApp
 import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
-import com.numbear.manjuan.data.repo.LibraryRepository
+import com.numbear.manjuan.source.webdav.WebDavAccountSection
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
     val app = LocalContext.current.applicationContext as ManjuanApp
     val settings by app.settings.settings.collectAsState(initial = ReaderSettings())
-    val sources by app.library.observeSources().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     fun update(next: ReaderSettings) {
         scope.launch { app.settings.update { next } }
@@ -121,18 +119,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            Text("WebDAV 账号", style = MaterialTheme.typography.titleMedium)
-            val accounts = sources.filter { it.type == LibraryRepository.WEBDAV }
-            if (accounts.isEmpty()) Text("还没有保存的账号")
-            accounts.forEach { source ->
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.weight(1f)) {
-                        Text(source.displayName)
-                        Text(source.baseUrl, style = MaterialTheme.typography.bodySmall)
-                    }
-                    TextButton(onClick = { scope.launch { app.library.deleteSource(source.id) } }) { Text("删除") }
-                }
-            }
+            WebDavAccountSection(onBrowse)
         }
     }
 }
