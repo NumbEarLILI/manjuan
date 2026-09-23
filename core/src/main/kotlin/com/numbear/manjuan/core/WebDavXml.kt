@@ -1,0 +1,78 @@
+package com.numbear.manjuan.core
+
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+import java.net.URLDecoder
+import javax.xml.XMLConstants
+import javax.xml.parsers.DocumentBuilderFactory
+
+object WebDavXml {
+    fun parse(xml: String, requestPath: String): List<WebDavEntry> {
+        val factory = DocumentBuilderFactory.newInstance()
+        factory.isNamespaceAware = true
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+        val document = factory.newDocumentBuilder().parse(xml.byteInputStream(Charsets.UTF_8))
+        val responses = document.documentElement.elementsByLocal("response")
+            .filter { it.parentNode == document.documentElement || it.localName.equals("response", true) }
+        val entries = ArrayList<WebDavEntry>()
+        val self = normalize(requestPath)
+        for (node in responses) {
+            val href = node.elementsByLocal("href").firstOrNull()?.textContent ?: continue
+            val path = normalize(decodeHref(href))
+            val display = node.elementsByLocal("displayname").firstOrNull()?.textContent?.trim().orEmpty()
+            val collection = node.elementsByLocal("collection").isNotEmpty()
+            val size = node.elementsByLocal("getcontentlength").firstOrNull()?.textContent?.toLongOrNull() ?: 0L
+            if (path == self || path.trimEnd('/') == self.trimEnd('/')) continue
+            val name = display.ifBlank { path.trimEnd('/').substringAfterLast('/') }.ifBlank { path }
+            entries += WebDavEntry(
+                path = if (collection) path.ensureSlash() else path,
+                name = name,
+                directory = collection,
+                size = size,
+            )
+        }
+        return entries.sortedWith(compareBy<WebDavEntry> { !it.directory }.thenBy(NaturalSort) { it.name })
+    }
+
+    private fun decodeHref(href: String): String {
+        val path = href.substringBefore('?')
+        val raw = if (path.startsWith("http://") || path.startsWith("https://")) {
+            path.substringAfter("://").substringAfter('/', "/")
+                .let { if (path.substringAfter("://").contains('/')) "/$it" else "/" }
+        } else {
+            path
+        }
+        return try {
+            URLDecoder.decode(raw, Charsets.UTF_8.name())
+        } catch (_: Exception) {
+            raw
+        }
+    }
+
+    private fun normalize(path: String): String {
+        val cleaned = path.trim().ifBlank { "/" }
+        return if (cleaned.startsWith("/")) cleaned else "/$cleaned"
+    }
+
+    private fun String.ensureSlash(): String = if (endsWith("/")) this else "$this/"
+
+}
+
+private fun Element.elementsByLocal(local: String): List<Element> {
+    val found = ArrayList<Element>()
+    fun walk(node: Node) {
+        val children = node.childNodes
+        for (index in 0 until children.length) {
+            val child = children.item(index)
+            if (child is Element) {
+                val name = child.localName ?: child.nodeName
+                if (name.equals(local, true) || name.substringAfter(':').equals(local, true)) {
+                    found += child
+                }
+                walk(child)
+            }
+        }
+    }
+    walk(this)
+    return found
+}
