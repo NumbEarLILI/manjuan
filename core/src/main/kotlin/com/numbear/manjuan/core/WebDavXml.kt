@@ -2,7 +2,6 @@ package com.numbear.manjuan.core
 
 import org.w3c.dom.Element
 import org.w3c.dom.Node
-import java.net.URLDecoder
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.parsers.ParserConfigurationException
@@ -25,7 +24,7 @@ object WebDavXml {
         val self = normalize(requestPath)
         for (node in responses) {
             val href = node.elementsByLocal("href").firstOrNull()?.textContent ?: continue
-            val path = normalize(decodeHref(href))
+            val path = WebDavPaths.hrefToPath(href, requestPath)
             val display = node.elementsByLocal("displayname").firstOrNull()?.textContent?.trim().orEmpty()
             val collection = node.elementsByLocal("collection").isNotEmpty()
             val size = node.elementsByLocal("getcontentlength").firstOrNull()?.textContent?.toLongOrNull() ?: 0L
@@ -39,21 +38,6 @@ object WebDavXml {
             )
         }
         return entries.sortedWith(compareBy<WebDavEntry> { !it.directory }.thenBy(NaturalSort) { it.name })
-    }
-
-    private fun decodeHref(href: String): String {
-        val path = href.substringBefore('?')
-        val raw = if (path.startsWith("http://") || path.startsWith("https://")) {
-            path.substringAfter("://").substringAfter('/', "/")
-                .let { if (path.substringAfter("://").contains('/')) "/$it" else "/" }
-        } else {
-            path
-        }
-        return try {
-            URLDecoder.decode(raw, Charsets.UTF_8.name())
-        } catch (_: Exception) {
-            raw
-        }
     }
 
     private fun normalize(path: String): String {

@@ -36,17 +36,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.numbear.manjuan.ManjuanApp
+import com.numbear.manjuan.cache.CacheProgress
 import com.numbear.manjuan.core.LocatorCodec
 import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.core.TextPaginator
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
+import com.numbear.manjuan.reader.common.ReaderLoading
 import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
 import com.numbear.manjuan.ui.inkColors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -57,6 +60,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var content by remember { mutableStateOf<NovelContent?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var download by remember { mutableStateOf<CacheProgress?>(null) }
     var chapter by remember { mutableIntStateOf(0) }
     var offset by remember { mutableIntStateOf(0) }
     var bookmarks by remember { mutableStateOf<List<BookmarkEntity>>(emptyList()) }
@@ -68,13 +72,16 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     LaunchedEffect(bookId) {
         loading = true
+        download = null
         try {
-            content = app.library.openNovel(bookId)
+            content = app.library.openNovel(bookId) { read, total -> download = CacheProgress(read, total) }
             val saved = app.library.progress(bookId)
             chapter = LocatorCodec.chapter(saved?.locator.orEmpty())
             offset = LocatorCodec.offset(saved?.locator.orEmpty())
             bookmarks = app.library.bookmarks(bookId)
             error = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (failure: Exception) {
             error = failure.message ?: "无法打开"
         } finally {
@@ -143,7 +150,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(colors.background)) {
         when {
-            loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+            loading -> ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 Text(error!!, color = colors.foreground)
                 TextButton(onClick = onBack) { Text("返回书架") }

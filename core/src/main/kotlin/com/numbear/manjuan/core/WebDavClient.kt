@@ -7,6 +7,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
 
@@ -52,29 +54,56 @@ class OkHttpWebDavClient(
     fun download(path: String, dest: File, onProgress: (read: Long, total: Long) -> Unit = { _, _ -> }) {
         val url = resolve(path) ?: throw UnsupportedBookException("WebDAV 地址无效")
         val request = Request.Builder().url(url).header("Authorization", authorization()).get().build()
-        execute(request) { response ->
-            when (response.code) {
-                401, 403 -> throw UnsupportedBookException("账号或密码不正确")
-                in 200..299 -> {
-                    val body = response.body ?: throw UnsupportedBookException("服务器没有返回文件内容")
-                    dest.parentFile?.mkdirs()
-                    val total = body.contentLength()
-                    body.byteStream().use { input ->
-                        dest.outputStream().use { output ->
-                            val buffer = ByteArray(16 * 1024)
-                            var readTotal = 0L
-                            while (true) {
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                output.write(buffer, 0, count)
-                                readTotal += count
-                                onProgress(readTotal, total)
+        val partial = File(dest.parentFile, dest.name + ".part")
+        try {
+            execute(request, "无法下载") { response ->
+                when (response.code) {
+                    401, 403 -> throw UnsupportedBookException("账号或密码不正确")
+                    in 200..299 -> {
+                        val body = response.body ?: throw UnsupportedBookException("无法下载")
+                        partial.parentFile?.mkdirs()
+                        val total = body.contentLength()
+                        onProgress(0L, total)
+                        body.byteStream().use { input ->
+                            partial.outputStream().use { output ->
+                                val buffer = ByteArray(16 * 1024)
+                                var readTotal = 0L
+                                var lastReport = 0L
+                                while (true) {
+                                    if (Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    if (count == 0) throw UnsupportedBookException("无法下载")
+                                    output.write(buffer, 0, count)
+                                    readTotal += count
+                                    val now = System.currentTimeMillis()
+                                    if (total in 0..readTotal || now - lastReport >= 100) {
+                                        lastReport = now
+                                        onProgress(readTotal, total)
+                                    }
+                                }
                             }
                         }
+                        if (partial.length() == 0L) throw UnsupportedBookException("无法下载")
+                        if (dest.exists() && !dest.delete()) throw UnsupportedBookException("无法下载")
+                        if (!partial.renameTo(dest)) {
+                            partial.copyTo(dest, overwrite = true)
+                            partial.delete()
+                        }
+                        onProgress(dest.length(), dest.length())
                     }
+                    else -> throw UnsupportedBookException("无法下载（HTTP ${response.code}）")
                 }
-                else -> throw UnsupportedBookException("下载失败，HTTP ${response.code}")
             }
+        } catch (error: UnsupportedBookException) {
+            partial.delete()
+            throw error
+        } catch (error: InterruptedIOException) {
+            partial.delete()
+            throw error
+        } catch (error: Exception) {
+            partial.delete()
+            throw error
         }
     }
 
@@ -87,7 +116,7 @@ class OkHttpWebDavClient(
             .get()
             .build()
         return try {
-            execute(request) { response ->
+            execute(request, "无法下载") { response ->
                 if (response.code == 401 || response.code == 403) {
                     throw UnsupportedBookException("账号或密码不正确")
                 }
@@ -98,6 +127,8 @@ class OkHttpWebDavClient(
                 } ?: ByteArray(0)
                 bytes
             }
+        } catch (error: InterruptedIOException) {
+            throw error
         } catch (error: UnsupportedBookException) {
             throw error
         } catch (_: Exception) {
@@ -117,25 +148,23 @@ class OkHttpWebDavClient(
 
     private fun authorization(): String = Credentials.basic(username, password, Charsets.UTF_8)
 
-    private fun resolve(path: String): String? {
-        val base = baseUrl.toHttpUrlOrNull() ?: return null
-        val relative = path.trim()
-        if (relative.startsWith("http://") || relative.startsWith("https://")) return relative
-        if (relative.isEmpty() || relative == "/") return base.toString()
-        if (relative.startsWith("/")) {
-            val origin = base.newBuilder().encodedPath("/").query(null).fragment(null).build()
-            return origin.resolve(relative.trimStart('/'))?.toString()
-        }
-        return base.resolve(relative)?.toString()
-    }
+    private fun resolve(path: String): String? = WebDavPaths.resolveUrl(baseUrl, path)
 
-    private fun <T> execute(request: Request, block: (okhttp3.Response) -> T): T {
+    private fun <T> execute(request: Request, block: (okhttp3.Response) -> T): T =
+        execute(request, "无法连接服务器", block)
+
+    private fun <T> execute(request: Request, ioMessage: String, block: (okhttp3.Response) -> T): T {
         try {
             client.newCall(request).execute().use { response -> return block(response) }
         } catch (error: UnsupportedBookException) {
             throw error
+        } catch (error: SocketTimeoutException) {
+            throw UnsupportedBookException("网络超时")
+        } catch (error: InterruptedIOException) {
+            if (Thread.currentThread().isInterrupted) throw error
+            throw UnsupportedBookException("网络超时")
         } catch (_: Exception) {
-            throw UnsupportedBookException("无法连接服务器")
+            throw UnsupportedBookException(ioMessage)
         }
     }
 
@@ -148,8 +177,9 @@ class OkHttpWebDavClient(
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
+            .writeTimeout(45, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
             .build()
     }
 }
