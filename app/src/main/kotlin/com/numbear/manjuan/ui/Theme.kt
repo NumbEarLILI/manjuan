@@ -1,39 +1,80 @@
 package com.numbear.manjuan.ui
 
+import android.app.Activity
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import com.numbear.manjuan.core.AppPalette
+import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
+import com.numbear.manjuan.core.paperInk
 
-val Paper = Color(0xFFF3EDE2)
-val Ink = Color(0xFF1B1714)
-val Cinnabar = Color(0xFFB6402C)
-val Moss = Color(0xFF2F4A3C)
+private fun Long.argb(): Color = Color(toInt())
 
-private val Colors = lightColorScheme(
-    primary = Cinnabar,
-    onPrimary = Color(0xFFFFF8F4),
-    secondary = Moss,
-    onSecondary = Color(0xFFF4EFE6),
-    background = Paper,
-    onBackground = Ink,
-    surface = Color(0xFFFFFBF6),
-    onSurface = Ink,
+private fun Color.looksLight(): Boolean {
+    val luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return luminance > 0.5
+}
+
+private fun AppPalette.toColorScheme() = darkColorScheme(
+    primary = primary.argb(),
+    onPrimary = onPrimary.argb(),
+    primaryContainer = primaryContainer.argb(),
+    onPrimaryContainer = onPrimaryContainer.argb(),
+    secondary = secondary.argb(),
+    onSecondary = onSecondary.argb(),
+    secondaryContainer = secondaryContainer.argb(),
+    onSecondaryContainer = onSecondaryContainer.argb(),
+    tertiary = secondary.argb(),
+    onTertiary = onSecondary.argb(),
+    tertiaryContainer = secondaryContainer.argb(),
+    onTertiaryContainer = onSecondaryContainer.argb(),
+    background = background.argb(),
+    onBackground = onBackground.argb(),
+    surface = surface.argb(),
+    onSurface = onSurface.argb(),
+    surfaceVariant = surfaceVariant.argb(),
+    onSurfaceVariant = onSurfaceVariant.argb(),
+    surfaceTint = Color.Transparent,
+    surfaceContainerLowest = surfaceContainerLowest.argb(),
+    surfaceContainerLow = surfaceContainerLow.argb(),
+    surfaceContainer = surfaceContainer.argb(),
+    surfaceContainerHigh = surfaceContainerHigh.argb(),
+    surfaceContainerHighest = surfaceContainerHighest.argb(),
+    outline = outline.argb(),
+    outlineVariant = outlineVariant.argb(),
 )
 
 @Composable
-fun ManjuanTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = Colors, content = content)
+fun ManjuanTheme(appearance: String = AppTheme.Default.storageKey, content: @Composable () -> Unit) {
+    val scheme = AppTheme.fromStorage(appearance).palette.toColorScheme()
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            val background = scheme.background.toArgb()
+            window.statusBarColor = background
+            window.navigationBarColor = background
+            val lightBars = scheme.background.looksLight()
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = lightBars
+                isAppearanceLightNavigationBars = lightBars
+            }
+        }
+    }
+    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 data class InkColors(val background: Color, val foreground: Color)
 
-fun ReaderSettings.inkColors(): InkColors = when (theme) {
-    "NIGHT" -> InkColors(Color(0xFF121417), Color(0xFFE7E1D6))
-    "SEPIA" -> InkColors(Color(0xFFF4E4C8), Color(0xFF3F2E22))
-    "CUSTOM" -> InkColors(Color(customBackground.toInt()), Color(customForeground.toInt()))
-    else -> InkColors(Color(0xFFF7F1E6), Color(0xFF1B1714))
+fun ReaderSettings.inkColors(): InkColors {
+    val ink = paperInk(appearance, theme, customBackground, customForeground)
+    return InkColors(ink.background.argb(), ink.foreground.argb())
 }
 
 fun formatLabel(format: String): String = when (format) {

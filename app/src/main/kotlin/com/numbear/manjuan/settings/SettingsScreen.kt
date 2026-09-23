@@ -1,5 +1,6 @@
 package com.numbear.manjuan.settings
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.ManjuanApp
+import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.data.repo.LibraryRepository
 import kotlinx.coroutines.launch
@@ -59,6 +61,17 @@ fun SettingsScreen(onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Text("外观 / 主题", style = MaterialTheme.typography.titleMedium)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppTheme.entries.forEach { theme ->
+                    FilterChip(
+                        selected = AppTheme.fromStorage(settings.appearance) == theme,
+                        onClick = { update(settings.copy(appearance = theme.storageKey, theme = AppTheme.PAPER_FOLLOW)) },
+                        label = { Text(theme.label) },
+                    )
+                }
+            }
+
             Text("小说", style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(settings.pageMode, { update(settings.copy(pageMode = true)) }, label = { Text("翻页") })
@@ -96,8 +109,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
             Text("纸色")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("DAY" to "日间", "NIGHT" to "夜间", "SEPIA" to "羊皮纸", "CUSTOM" to "自定义").forEach { (value, label) ->
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    AppTheme.PAPER_FOLLOW to "跟随",
+                    "DAY" to "日间",
+                    "NIGHT" to "夜间",
+                    "SEPIA" to "羊皮纸",
+                    "CUSTOM" to "自定义",
+                ).forEach { (value, label) ->
                     FilterChip(settings.theme == value, { update(settings.copy(theme = value)) }, label = { Text(label) })
                 }
             }

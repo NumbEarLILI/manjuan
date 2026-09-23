@@ -2,6 +2,7 @@ package com.numbear.manjuan.reader.common
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.LocalRegisterVolumeKey
+import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
 
 @Composable
@@ -152,8 +154,14 @@ fun ReaderSettingsSheet(
                 }
             }
             Text("纸色")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("DAY" to "日间", "NIGHT" to "夜间", "SEPIA" to "羊皮纸", "CUSTOM" to "自定义").forEach { (value, label) ->
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    AppTheme.PAPER_FOLLOW to "跟随",
+                    "DAY" to "日间",
+                    "NIGHT" to "夜间",
+                    "SEPIA" to "羊皮纸",
+                    "CUSTOM" to "自定义",
+                ).forEach { (value, label) ->
                     FilterChip(selected = settings.theme == value, onClick = { onChange(settings.copy(theme = value)) }, label = { Text(label) })
                 }
             }

@@ -49,7 +49,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import com.numbear.manjuan.ManjuanApp
 import com.numbear.manjuan.data.db.BookEntity
-import com.numbear.manjuan.ui.Ink
 import com.numbear.manjuan.ui.formatLabel
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
@@ -103,7 +102,7 @@ fun BookshelfScreen(onAdd: () -> Unit, onSettings: () -> Unit, onOpen: (Long) ->
             if (visible.isEmpty()) {
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("书架还是空的", style = MaterialTheme.typography.titleMedium)
-                    Text("从本地文件夹或 WebDAV 加一本书", color = Ink.copy(alpha = 0.7f))
+                    Text("从本地文件夹或 WebDAV 加一本书", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = onAdd) { Text("添加书籍") }
                 }
             } else if (filter == ShelfFilter.SOURCE) {
@@ -168,7 +167,7 @@ private fun BookRow(book: BookEntity, source: String, percent: Float, onOpen: ()
             Text(book.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
             Text(
                 listOf(formatLabel(book.format), source, book.author).filter { it.isNotBlank() }.joinToString(" · "),
-                color = Ink.copy(alpha = 0.65f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
             LinearProgressIndicator(

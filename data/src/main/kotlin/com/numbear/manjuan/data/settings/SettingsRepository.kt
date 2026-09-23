@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -23,6 +24,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.fontSize] = next.fontSizeSp
             prefs[Keys.lineSpacing] = next.lineSpacing
             prefs[Keys.margin] = next.marginDp
+            prefs[Keys.appearance] = next.appearance
             prefs[Keys.theme] = next.theme
             prefs[Keys.customBg] = next.customBackground
             prefs[Keys.customFg] = next.customForeground
@@ -41,7 +43,8 @@ class SettingsRepository(private val context: Context) {
             fontSizeSp = prefs[Keys.fontSize] ?: 18f,
             lineSpacing = prefs[Keys.lineSpacing] ?: 1.6f,
             marginDp = prefs[Keys.margin] ?: 20f,
-            theme = prefs[Keys.theme] ?: "DAY",
+            appearance = prefs[Keys.appearance] ?: AppTheme.Default.storageKey,
+            theme = prefs[Keys.theme] ?: AppTheme.PAPER_FOLLOW,
             customBackground = prefs[Keys.customBg] ?: 0xFFF3EDE2,
             customForeground = prefs[Keys.customFg] ?: 0xFF1B1714,
             volumeKeys = prefs[Keys.volumeKeys] ?: false,
@@ -57,6 +60,7 @@ class SettingsRepository(private val context: Context) {
         val fontSize = floatPreferencesKey("font_size")
         val lineSpacing = floatPreferencesKey("line_spacing")
         val margin = floatPreferencesKey("margin")
+        val appearance = stringPreferencesKey("appearance")
         val theme = stringPreferencesKey("theme")
         val customBg = longPreferencesKey("custom_bg")
         val customFg = longPreferencesKey("custom_fg")
