@@ -1,7 +1,39 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+}
+
+val ciSigningPropertiesFile = rootProject.file("signing/ci-signing.properties")
+val ciKeystoreFile = rootProject.file("signing/manjuan-ci.jks")
+
+if (!ciSigningPropertiesFile.isFile) {
+    throw GradleException(
+        "Missing CI signing properties: ${ciSigningPropertiesFile.path}. " +
+            "Debug APKs must be signed with the committed keystore. See signing/README.md.",
+    )
+}
+if (!ciKeystoreFile.isFile) {
+    throw GradleException(
+        "Missing CI keystore: ${ciKeystoreFile.path}. " +
+            "Debug APKs must be signed with the committed keystore. See signing/README.md.",
+    )
+}
+
+val ciSigningProperties = Properties().apply {
+    ciSigningPropertiesFile.inputStream().use { load(it) }
+}
+
+fun requireCiSigningProperty(name: String): String {
+    val value = ciSigningProperties.getProperty(name)?.trim().orEmpty()
+    if (value.isEmpty()) {
+        throw GradleException(
+            "signing/ci-signing.properties is missing required property '$name'. See signing/README.md.",
+        )
+    }
+    return value
 }
 
 android {
@@ -16,7 +48,20 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        create("ci") {
+            storeFile = ciKeystoreFile
+            storePassword = requireCiSigningProperty("storePassword")
+            keyAlias = requireCiSigningProperty("keyAlias")
+            keyPassword = requireCiSigningProperty("keyPassword")
+        }
+    }
+
     buildTypes {
+        debug {
+            // Stable sideload key. Do not fall back to ~/.android/debug.keystore.
+            signingConfig = signingConfigs.getByName("ci")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

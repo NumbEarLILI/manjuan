@@ -30,7 +30,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-不想在本机装 SDK 时，可以直接下载 CI 打出来的调试包（调试签名，侧载安装）：
+不想在本机装 SDK 时，可以直接下载 CI 打出来的调试包（仓库内固定 CI 密钥签名，侧载安装）。更早的随机调试签名包无法覆盖安装，需要先卸载一次：
 
 https://github.com/NumbEarLILI/manjuan/releases/tag/manjuan-apk-20260923
 
