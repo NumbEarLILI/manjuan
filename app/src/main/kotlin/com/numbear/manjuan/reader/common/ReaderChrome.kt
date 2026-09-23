@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -35,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.LocalRegisterVolumeKey
+import com.numbear.manjuan.cache.CacheProgress
 import com.numbear.manjuan.core.AppTheme
 import com.numbear.manjuan.core.ReaderSettings
 
@@ -65,6 +68,25 @@ fun BindReadingChrome(settings: ReaderSettings, onPrev: () -> Unit, onNext: () -
     DisposableEffect(settings.keepScreenOn) {
         view.keepScreenOn = settings.keepScreenOn
         onDispose { view.keepScreenOn = false }
+    }
+}
+
+@Composable
+fun ReaderLoading(download: CacheProgress?, onCancel: () -> Unit, color: Color, modifier: Modifier = Modifier) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier.padding(24.dp)) {
+        CircularProgressIndicator(color = color)
+        Text(if (download == null) "正在打开…" else "正在下载…", color = color, modifier = Modifier.padding(top = 16.dp))
+        if (download != null && download.total > 0) {
+            LinearProgressIndicator(
+                progress = { (download.read.toFloat() / download.total).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+            )
+            Text("${download.read / 1024} / ${download.total / 1024} KB", color = color, modifier = Modifier.padding(top = 8.dp))
+        } else if (download != null) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+            Text("已接收 ${download.read / 1024} KB", color = color, modifier = Modifier.padding(top = 8.dp))
+        }
+        TextButton(onClick = onCancel) { Text("取消") }
     }
 }
 

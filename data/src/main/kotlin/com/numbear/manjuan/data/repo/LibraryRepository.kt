@@ -22,14 +22,19 @@ import com.numbear.manjuan.core.ReadingProgress
 import com.numbear.manjuan.core.TextEncoding
 import com.numbear.manjuan.core.TxtChapters
 import com.numbear.manjuan.core.UnsupportedBookException
+import com.numbear.manjuan.core.WebDavBooks
 import com.numbear.manjuan.core.WebDavEntry
+import com.numbear.manjuan.core.WebDavPaths
 import com.numbear.manjuan.core.WebDavScan
 import com.numbear.manjuan.core.WebDavStatus
 import com.numbear.manjuan.core.ZipImages
 import com.numbear.manjuan.core.kind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
 import com.numbear.manjuan.data.crypto.WebDavCipher
 import com.numbear.manjuan.data.db.BookEntity
 import com.numbear.manjuan.data.db.BookmarkEntity
@@ -41,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.InterruptedIOException
 import java.util.UUID
 import java.util.zip.ZipFile
 
@@ -303,19 +309,21 @@ class LibraryRepository(
         }
         val remote = client(source)
         val destDir = File(context.filesDir, "cache-books/${book.id}").apply { mkdirs() }
+        val remoteName = WebDavBooks.displayFileName(book.title, book.remotePath.ifBlank { book.location })
         val cached = if (book.format == BookFormat.IMAGE_FOLDER.name) {
-            val children = remote.list(book.remotePath.ifBlank { book.location })
-            val images = children.filter { !it.directory && FormatDetector.isImageName(it.name) }
+            val children = blockingWebDav { remote.list(book.remotePath.ifBlank { book.location }) }
+            val images = children.filter { !it.directory && FormatDetector.isImageName(it.name.ifBlank { it.path }) }
             if (images.isEmpty()) throw UnsupportedBookException("远程文件夹里没有图片")
             images.forEach { child ->
-                val fileName = child.name.substringAfterLast('/').ifBlank { "page" }
-                remote.download(child.path, File(destDir, fileName), onProgress)
+                coroutineContext.ensureActive()
+                val fileName = WebDavBooks.displayFileName(child.name, child.path).ifBlank { "page" }
+                blockingWebDav { remote.download(child.path, File(destDir, fileName), onProgress) }
             }
             destDir.absolutePath
         } else {
-            val ext = FormatDetector.extension(book.remotePath.ifBlank { book.title }).ifBlank { "bin" }
+            val ext = FormatDetector.extension(remoteName).ifBlank { "bin" }
             val dest = File(destDir, safeName(book.title) + ".$ext")
-            remote.download(book.remotePath.ifBlank { book.location }, dest, onProgress)
+            blockingWebDav { remote.download(book.remotePath.ifBlank { book.location }, dest, onProgress) }
             dest.absolutePath
         }
         database.books().update(book.copy(cachedPath = cached, sizeBytes = File(cached).let { if (it.isFile) it.length() else book.sizeBytes }))
@@ -364,11 +372,52 @@ class LibraryRepository(
 
     suspend fun deleteBookmark(id: Long) = withContext(Dispatchers.IO) { database.bookmarks().delete(id) }
 
+    suspend fun prepareReader(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): String =
+        withContext(Dispatchers.IO) {
+            val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
+            val source = database.sources().get(book.sourceId)
+            if (source?.type == WEBDAV && !cacheReady(book)) {
+                cacheBook(book.id, onProgress)
+            }
+            val fresh = database.books().get(bookId) ?: book
+            val resolved = WebDavBooks.resolve(
+                formatName = fresh.format,
+                kindName = fresh.kind,
+                location = fresh.location,
+                remotePath = fresh.remotePath,
+                title = fresh.title,
+                header = sniffCached(fresh),
+                cachedImageCount = cachedImageCount(fresh),
+            )
+            val kind = resolved.format.kind() ?: throw UnsupportedBookException("无法打开这种书")
+            if (fresh.format != resolved.format.name || fresh.kind != kind.name) {
+                database.books().update(fresh.copy(format = resolved.format.name, kind = kind.name))
+            }
+            kind.name
+        }
+
     suspend fun openNovel(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): NovelContent =
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
             val file = ensureFile(book, onProgress)
-            val format = runCatching { BookFormat.valueOf(book.format) }.getOrDefault(BookFormat.UNSUPPORTED)
+            val resolved = WebDavBooks.resolve(
+                formatName = book.format,
+                kindName = book.kind,
+                location = book.location,
+                remotePath = book.remotePath,
+                title = book.title,
+                header = fileHeader(file),
+                cachedImageCount = cachedImageCount(database.books().get(book.id) ?: book),
+            )
+            if (resolved.format.kind() != com.numbear.manjuan.core.BookKind.NOVEL) {
+                val kind = resolved.format.kind()
+                if (kind != null) {
+                    val current = database.books().get(book.id) ?: book
+                    database.books().update(current.copy(format = resolved.format.name, kind = kind.name))
+                }
+                throw UnsupportedBookException("这是漫画或 PDF，不能当小说打开")
+            }
+            val format = resolved.format
             val content = when (format) {
                 BookFormat.TXT -> {
                     val decoded = TextEncoding.decode(file.readBytes())
@@ -381,10 +430,11 @@ class LibraryRepository(
                 BookFormat.MOBI, BookFormat.AZW3 -> MobiParser.parse(file)
                 else -> throw UnsupportedBookException("这个文件不能当小说打开")
             }
+            val stored = database.books().get(book.id) ?: book
             database.books().update(
-                book.copy(
-                    title = content.title.ifBlank { book.title },
-                    author = content.author.ifBlank { book.author },
+                stored.copy(
+                    title = content.title.ifBlank { stored.title },
+                    author = content.author.ifBlank { stored.author },
                     lastOpenedAt = System.currentTimeMillis(),
                 ),
             )
@@ -430,7 +480,8 @@ class LibraryRepository(
                 }
                 else -> throw UnsupportedBookException("这个文件不能当漫画或 PDF 打开")
             }
-            database.books().update(book.copy(lastOpenedAt = System.currentTimeMillis()))
+            val stored = database.books().get(book.id) ?: book
+            database.books().update(stored.copy(lastOpenedAt = System.currentTimeMillis()))
             content
         }
 
@@ -495,22 +546,23 @@ class LibraryRepository(
     private suspend fun insertRemote(sourceId: Long, entry: WebDavEntry): RemoteInsert {
         val existing = database.books().findRemote(sourceId, entry.path)
         if (existing != null) return RemoteInsert.Existing(existing.id)
-        val format = if (entry.directory) {
-            BookFormat.IMAGE_FOLDER
+        val header = if (entry.directory) {
+            ByteArray(0)
         } else {
-            val header = client(requireSource(sourceId)).peek(entry.path)
-            val detection = FormatDetector.detectFile(entry.name, header)
-            if (detection.format == BookFormat.UNSUPPORTED) {
-                throw UnsupportedBookException(detection.error ?: "不支持的格式：${entry.name}")
-            }
-            detection.format
+            val remote = client(requireSource(sourceId))
+            blockingWebDav { remote.peek(entry.path) }
         }
-        val kind = format.kind() ?: throw UnsupportedBookException("不支持的格式：${entry.name}")
+        val detected = WebDavBooks.classify(entry.name, entry.path, entry.directory, header)
+        if (detected.format == BookFormat.UNSUPPORTED) {
+            throw UnsupportedBookException(detected.error ?: "不支持的格式：${entry.name}")
+        }
+        val kind = detected.format.kind() ?: throw UnsupportedBookException("不支持的格式：${entry.name}")
+        val titleSource = entry.name.ifBlank { WebDavBooks.displayFileName(entry.name, entry.path) }
         val id = database.books().insert(
             BookEntity(
                 sourceId = sourceId,
-                title = entry.name.substringBeforeLast('.').ifBlank { entry.name },
-                format = format.name,
+                title = titleSource.substringBeforeLast('.').ifBlank { titleSource },
+                format = detected.format.name,
                 kind = kind.name,
                 location = entry.path,
                 remotePath = entry.path,
@@ -647,18 +699,28 @@ class LibraryRepository(
     }
 
     private suspend fun ensureFile(book: BookEntity, onProgress: (Long, Long) -> Unit): File {
-        if (book.cachedPath.isNotBlank() && File(book.cachedPath).isFile) return File(book.cachedPath)
-        if (book.location.startsWith("/") && File(book.location).isFile) return File(book.location)
         val source = database.sources().get(book.sourceId)
+        val local = WebDavPaths.localReadablePath(
+            sourceType = source?.type.orEmpty(),
+            location = book.location,
+            cachedPath = book.cachedPath,
+            remotePath = book.remotePath,
+        ) { path -> File(path).isFile }
+        if (local != null) return File(local)
         if (source?.type == WEBDAV) {
             try {
                 cacheBook(book.id, onProgress)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: UnsupportedBookException) {
-                throw UnsupportedBookException("未缓存，当前无法离线打开。${error.message}")
+                val detail = error.message.orEmpty()
+                if (detail.contains("网络超时") || detail.contains("无法下载")) throw error
+                throw UnsupportedBookException(detail.ifBlank { "未缓存，当前无法离线打开" })
             }
             val updated = database.books().get(book.id)
             val path = updated?.cachedPath.orEmpty()
             if (path.isNotBlank() && File(path).isFile) return File(path)
+            throw UnsupportedBookException("未缓存，当前无法离线打开")
         }
         throw UnsupportedBookException("未缓存，当前无法离线打开")
     }
@@ -723,11 +785,48 @@ class LibraryRepository(
     private fun client(source: SourceEntity): OkHttpWebDavClient =
         client(source.baseUrl, source.username, cipher.decrypt(source.passwordCipher), source.rootPath)
 
-    private fun client(url: String, username: String, password: String, root: String): OkHttpWebDavClient {
-        val base = OkHttpWebDavClient.normalizeBase(url)
-        val extra = root.trim().trim('/')
-        val joined = if (extra.isEmpty()) base else OkHttpWebDavClient.normalizeBase(base + extra + "/")
-        return OkHttpWebDavClient(joined, username, password)
+    private fun client(url: String, username: String, password: String, root: String): OkHttpWebDavClient =
+        OkHttpWebDavClient(WebDavPaths.joinBase(url, root), username, password)
+
+    private suspend fun <T> blockingWebDav(block: () -> T): T {
+        try {
+            return runInterruptible { block() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: InterruptedIOException) {
+            if (currentCoroutineContext().isActive) throw UnsupportedBookException("网络超时")
+            throw CancellationException("下载已取消", error)
+        } catch (error: InterruptedException) {
+            throw CancellationException("下载已取消", error)
+        }
+    }
+
+    private fun cacheReady(book: BookEntity): Boolean {
+        if (book.cachedPath.isBlank()) return false
+        val file = File(book.cachedPath)
+        return file.isFile || (file.isDirectory && cachedImageCount(book) > 0)
+    }
+
+    private fun sniffCached(book: BookEntity): ByteArray {
+        val file = File(book.cachedPath)
+        if (!file.isFile) return ByteArray(0)
+        return fileHeader(file)
+    }
+
+    private fun fileHeader(file: File): ByteArray = try {
+        file.inputStream().use { input ->
+            val buffer = ByteArray(128)
+            val count = input.read(buffer)
+            if (count <= 0) ByteArray(0) else buffer.copyOf(count)
+        }
+    } catch (_: Exception) {
+        ByteArray(0)
+    }
+
+    private fun cachedImageCount(book: BookEntity): Int {
+        val file = File(book.cachedPath)
+        if (!file.isDirectory) return 0
+        return file.listFiles().orEmpty().count { FormatDetector.isImageName(it.name) }
     }
 
     private fun displayName(uri: Uri): String =

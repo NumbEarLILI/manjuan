@@ -6,6 +6,7 @@ import java.io.File
 import java.util.zip.ZipFile
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.parsers.ParserConfigurationException
 
 object EpubParser {
     fun parse(file: File): NovelContent {
@@ -97,7 +98,11 @@ internal fun decodeXml(bytes: ByteArray): String {
 private fun parseXml(xml: String): org.w3c.dom.Document {
     val factory = DocumentBuilderFactory.newInstance()
     factory.isNamespaceAware = true
-    factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+    try {
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+    } catch (_: ParserConfigurationException) {
+        // Android's DocumentBuilderFactory rejects this feature on every API level.
+    }
     try {
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
     } catch (_: Exception) {

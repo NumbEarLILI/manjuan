@@ -111,6 +111,26 @@ class LibraryWalkTest {
         assertEquals(listOf("here.epub", "inner.mobi", "buried.azw3"), deep)
     }
 
+    @Test
+    fun webDavScanImportsPathExtensionAndImageFolders() {
+        val tree = mapOf(
+            "" to listOf(
+                entry("/dav/第1话.cbz", "第1话"),
+                entry("/dav/pics/", "pics", directory = true),
+                entry("/dav/notes.txt", "notes.txt"),
+            ),
+            "/dav/pics/" to listOf(
+                entry("/dav/pics/01.jpg", "01.jpg"),
+                entry("/dav/pics/02.png", "02.png"),
+            ),
+        )
+        val found = ArrayList<String>()
+        WebDavScan.forEachBook(startPath = "", list = { path -> tree[path].orEmpty() }) {
+            found += "${it.name}:${it.directory}"
+        }
+        assertEquals(listOf("第1话:false", "pics:true", "notes.txt:false"), found)
+    }
+
     private fun entry(path: String, name: String, directory: Boolean = false) =
         WebDavEntry(path = path, name = name, directory = directory, size = 12)
 }

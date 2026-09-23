@@ -20,7 +20,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -48,10 +50,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import com.numbear.manjuan.ManjuanApp
+import com.numbear.manjuan.cache.CacheProgress
 import com.numbear.manjuan.data.db.BookEntity
 import com.numbear.manjuan.ui.formatLabel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
+
+private data class BatchCache(
+    val index: Int,
+    val total: Int,
+    val title: String,
+    val progress: CacheProgress,
+)
 
 private enum class ShelfFilter { RECENT, ALL, SOURCE }
 
@@ -64,7 +76,12 @@ fun BookshelfScreen(onAdd: () -> Unit, onSettings: () -> Unit, onOpen: (Long) ->
     val progress by app.library.observeProgress().collectAsState(initial = emptyList())
     var filter by remember { mutableStateOf(ShelfFilter.ALL) }
     var query by remember { mutableStateOf("") }
-    var pendingDelete by remember { mutableStateOf<BookEntity?>(null) }
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(setOf<Long>()) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var batch by remember { mutableStateOf<BatchCache?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val batchJob = remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val sourceName = sources.associate { it.id to it.displayName }
     val visible = books.filter { book ->
@@ -75,11 +92,73 @@ fun BookshelfScreen(onAdd: () -> Unit, onSettings: () -> Unit, onOpen: (Long) ->
         if (filter == ShelfFilter.RECENT) list.sortedByDescending { it.lastOpenedAt } else list
     }
 
+    fun exitSelection() {
+        selecting = false
+        selected = emptySet()
+    }
+
+    fun toggle(id: Long) {
+        selected = if (id in selected) selected - id else selected + id
+    }
+
+    fun startBatchCache() {
+        val ids = visible.map { it.id }.filter { it in selected }
+        if (ids.isEmpty() || batch != null) return
+        val titles = books.associate { it.id to it.title }
+        batchJob.value?.cancel()
+        batchJob.value = scope.launch {
+            var done = 0
+            val errors = ArrayList<String>()
+            ids.forEachIndexed { index, id ->
+                val title = titles[id] ?: "未命名"
+                batch = BatchCache(index, ids.size, title, CacheProgress(0, -1))
+                try {
+                    app.library.cacheBook(id) { read, total ->
+                        batch = BatchCache(index, ids.size, title, CacheProgress(read, total))
+                    }
+                    done++
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    errors += "$title：${failure.message ?: "缓存失败"}"
+                }
+            }
+            batch = null
+            notice = if (errors.isEmpty()) {
+                "已缓存 $done 本"
+            } else {
+                "已缓存 $done 本，失败 ${errors.size} 本\n${errors.take(3).joinToString("\n")}"
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("漫卷") },
-                actions = { IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, contentDescription = "设置") } },
+                title = { Text(if (selecting) "已选 ${selected.size}" else "漫卷") },
+                navigationIcon = {
+                    if (selecting) {
+                        IconButton(onClick = { exitSelection() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "取消选择")
+                        }
+                    }
+                },
+                actions = {
+                    if (selecting) {
+                        TextButton(onClick = {
+                            selected = if (visible.isNotEmpty() && selected.containsAll(visible.map { it.id })) {
+                                emptySet()
+                            } else {
+                                visible.map { it.id }.toSet()
+                            }
+                        }) { Text(if (visible.isNotEmpty() && selected.containsAll(visible.map { it.id })) "取消全选" else "全选") }
+                        TextButton(enabled = selected.isNotEmpty() && batch == null, onClick = { startBatchCache() }) { Text("缓存") }
+                        TextButton(enabled = selected.isNotEmpty() && batch == null, onClick = { confirmDelete = true }) { Text("删除") }
+                    } else {
+                        TextButton(onClick = { selecting = true }) { Text("选择") }
+                        IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, contentDescription = "设置") }
+                    }
+                },
             )
         },
         floatingActionButton = {
@@ -112,7 +191,20 @@ fun BookshelfScreen(onAdd: () -> Unit, onSettings: () -> Unit, onOpen: (Long) ->
                         if (group.isNotEmpty()) {
                             item { Text(source.displayName, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(vertical = 8.dp)) }
                             items(group, key = { it.id }) { book ->
-                                BookRow(book, sourceName[book.sourceId].orEmpty(), progress.firstOrNull { it.bookId == book.id }?.percent ?: 0f, { onOpen(book.id) }) { pendingDelete = book }
+                                BookRow(
+                                    book,
+                                    sourceName[book.sourceId].orEmpty(),
+                                    progress.firstOrNull { it.bookId == book.id }?.percent ?: 0f,
+                                    selecting = selecting,
+                                    checked = book.id in selected,
+                                    onOpen = {
+                                        if (selecting) toggle(book.id) else onOpen(book.id)
+                                    },
+                                    onSelect = {
+                                        selecting = true
+                                        toggle(book.id)
+                                    },
+                                )
                             }
                         }
                     }
@@ -120,38 +212,102 @@ fun BookshelfScreen(onAdd: () -> Unit, onSettings: () -> Unit, onOpen: (Long) ->
             } else {
                 LazyColumn(contentPadding = PaddingValues(bottom = 88.dp)) {
                     items(visible, key = { it.id }) { book ->
-                        BookRow(book, sourceName[book.sourceId].orEmpty(), progress.firstOrNull { it.bookId == book.id }?.percent ?: 0f, { onOpen(book.id) }) { pendingDelete = book }
+                        BookRow(
+                            book,
+                            sourceName[book.sourceId].orEmpty(),
+                            progress.firstOrNull { it.bookId == book.id }?.percent ?: 0f,
+                            selecting = selecting,
+                            checked = book.id in selected,
+                            onOpen = {
+                                if (selecting) toggle(book.id) else onOpen(book.id)
+                            },
+                            onSelect = {
+                                selecting = true
+                                toggle(book.id)
+                            },
+                        )
                     }
                 }
             }
         }
     }
 
-    pendingDelete?.let { book ->
+    if (confirmDelete) {
         AlertDialog(
-            onDismissRequest = { pendingDelete = null },
+            onDismissRequest = { confirmDelete = false },
             title = { Text("移出书架") },
-            text = { Text("「${book.title}」会从书架移除。本地副本和缓存也会删除，原始文件不会动。") },
+            text = { Text("将移除选中的 ${selected.size} 本书。本地副本和缓存也会删除，服务器上的原始文件不会动。") },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch { app.library.deleteBook(book.id) }
-                    pendingDelete = null
-                }) { Text("移除") }
+                    val ids = selected.toList()
+                    confirmDelete = false
+                    scope.launch {
+                        ids.forEach { app.library.deleteBook(it) }
+                        exitSelection()
+                    }
+                }) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+        )
+    }
+    batch?.let { state ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在缓存 ${state.index + 1}/${state.total}") },
+            text = {
+                Column {
+                    Text(state.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val progress = state.progress
+                    if (progress.total > 0) {
+                        LinearProgressIndicator(
+                            progress = { (progress.read.toFloat() / progress.total).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        )
+                        Text("${progress.read / 1024} / ${progress.total / 1024} KB", modifier = Modifier.padding(top = 8.dp))
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+                        Text("已接收 ${progress.read / 1024} KB", modifier = Modifier.padding(top = 8.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    batchJob.value?.cancel()
+                    batch = null
+                }) { Text("取消") }
+            },
+        )
+    }
+    notice?.let { text ->
+        AlertDialog(
+            onDismissRequest = { notice = null },
+            title = { Text("漫卷") },
+            text = { Text(text) },
+            confirmButton = { TextButton(onClick = { notice = null }) { Text("好") } },
         )
     }
 }
 
 @Composable
-private fun BookRow(book: BookEntity, source: String, percent: Float, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun BookRow(
+    book: BookEntity,
+    source: String,
+    percent: Float,
+    selecting: Boolean,
+    checked: Boolean,
+    onOpen: () -> Unit,
+    onSelect: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
-            .combinedClickable(onClick = onOpen, onLongClick = onDelete),
+            .combinedClickable(onClick = onOpen, onLongClick = onSelect),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selecting) {
+            Checkbox(checked = checked, onCheckedChange = { onSelect() })
+        }
         val cover = coverColor(book.title)
         Box(
             Modifier

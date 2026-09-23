@@ -78,12 +78,21 @@ object WebDavScan {
             if (!visited.add(key)) return
             onDirectory(path)
             val children = list(path)
-            for (entry in children) {
+            val usable = children.filter { entry ->
+                !LibraryNames.isJunk(entry.name) && !LibraryNames.isJunk(entry.path)
+            }
+            val hasBook = usable.any { !it.directory && WebDavBooks.isImportableFile(it.name, it.path) }
+            val hasImage = usable.any { !it.directory && FormatDetector.isImageName(it.name.ifBlank { it.path }) }
+            if (!hasBook && hasImage) {
+                val folderName = path.trim().trimEnd('/').substringAfterLast('/').ifBlank { "图片文件夹" }
+                val folderPath = path.trim().ifBlank { "/" }.let { if (it.endsWith("/")) it else "$it/" }
+                onBook(WebDavEntry(path = folderPath, name = folderName, directory = true, size = 0))
+            }
+            for (entry in usable) {
                 if (!isActive()) return
-                if (LibraryNames.isJunk(entry.name) || LibraryNames.isJunk(entry.path)) continue
                 if (entry.directory) {
                     if (depth < maxDepth) walk(entry.path, depth + 1)
-                } else if (LibraryNames.isBookFile(entry.name)) {
+                } else if (WebDavBooks.isImportableFile(entry.name, entry.path)) {
                     onBook(entry)
                 }
             }

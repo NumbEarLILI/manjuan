@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.ManjuanApp
+import com.numbear.manjuan.cache.CacheProgress
 import com.numbear.manjuan.core.LocatorCodec
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.data.db.BookmarkEntity
@@ -51,10 +52,12 @@ import com.numbear.manjuan.data.open.BitmapIO
 import com.numbear.manjuan.data.repo.PageRef
 import com.numbear.manjuan.data.repo.PagedContent
 import com.numbear.manjuan.reader.common.BindReadingChrome
+import com.numbear.manjuan.reader.common.ReaderLoading
 import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,6 +77,7 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     var content by remember { mutableStateOf<PagedContent?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var download by remember { mutableStateOf<CacheProgress?>(null) }
     var page by remember { mutableIntStateOf(0) }
     var bookmarks by remember { mutableStateOf<List<BookmarkEntity>>(emptyList()) }
     var chrome by remember { mutableStateOf(true) }
@@ -83,11 +87,14 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     LaunchedEffect(bookId) {
         loading = true
+        download = null
         try {
-            content = app.library.openPaged(bookId)
+            content = app.library.openPaged(bookId) { read, total -> download = CacheProgress(read, total) }
             page = LocatorCodec.pageIndex(app.library.progress(bookId)?.locator.orEmpty())
             bookmarks = app.library.bookmarks(bookId)
             error = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (failure: Exception) {
             error = failure.message ?: "无法打开"
         } finally {
@@ -112,7 +119,7 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(scheme.background)) {
         when {
-            loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+            loading -> ReaderLoading(download, onBack, scheme.onBackground, Modifier.align(Alignment.Center).fillMaxWidth())
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 Text(error!!, color = scheme.onBackground)
                 TextButton(onClick = onBack) { Text("返回书架") }
