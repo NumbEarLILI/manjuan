@@ -30,6 +30,12 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+不想在本机装 SDK 时，可以直接下载 CI 打出来的调试包（调试签名，侧载安装）：
+
+https://github.com/NumbEarLILI/manjuan/releases/tag/manjuan-apk-20260923
+
+发布页上的 `manjuan.apk` 显示为「漫卷.apk」，旁边还有 `manjuan-debug.apk`。同一构建也会以名为 `manjuan-apk` 的 Actions 产物保留 30 天。推送到 `main` 会重新编译并更新这份预发布。
+
 核心解析（编码、EPUB、MOBI、WebDAV）可以用 JVM 单测，不需要模拟器：
 
 ```bash
