@@ -17,3 +17,18 @@ data class PagedContent(
 )
 
 data class ImportReport(val added: Int, val errors: List<String>)
+
+data class RemoteScanProgress(
+    val found: Int,
+    val imported: Int,
+    val skipped: Int,
+    val errorCount: Int,
+    val current: String,
+)
+
+data class RemoteScanReport(
+    val found: Int,
+    val imported: Int,
+    val skipped: Int,
+    val errors: List<String>,
+)

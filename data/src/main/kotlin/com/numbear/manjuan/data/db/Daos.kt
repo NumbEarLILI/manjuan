@@ -20,6 +20,9 @@ interface SourceDao {
     @Insert
     suspend fun insert(source: SourceEntity): Long
 
+    @Update
+    suspend fun update(source: SourceEntity)
+
     @Query("DELETE FROM sources WHERE id = :id")
     suspend fun delete(id: Long)
 }
