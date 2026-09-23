@@ -64,10 +64,10 @@ class OkHttpWebDavClient(
                         partial.parentFile?.mkdirs()
                         val total = body.contentLength()
                         onProgress(0L, total)
+                        var readTotal = 0L
                         body.byteStream().use { input ->
                             partial.outputStream().use { output ->
                                 val buffer = ByteArray(16 * 1024)
-                                var readTotal = 0L
                                 var lastReport = 0L
                                 while (true) {
                                     if (Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
@@ -85,6 +85,7 @@ class OkHttpWebDavClient(
                             }
                         }
                         if (partial.length() == 0L) throw UnsupportedBookException("无法下载")
+                        if (total >= 0 && readTotal != total) throw UnsupportedBookException("下载不完整")
                         if (dest.exists() && !dest.delete()) throw UnsupportedBookException("无法下载")
                         if (!partial.renameTo(dest)) {
                             partial.copyTo(dest, overwrite = true)

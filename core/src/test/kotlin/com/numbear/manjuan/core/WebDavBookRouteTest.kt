@@ -83,6 +83,22 @@ class WebDavBookRouteTest {
     }
 
     @Test
+    fun mobiBytesStoredAsTxtOpenAsMobiNotPlainText() {
+        val header = ByteArray(80)
+        "BOOK".toByteArray(Charsets.US_ASCII).copyInto(header, 60)
+        "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 64)
+        val byPath = WebDavBooks.resolve("TXT", "NOVEL", "/dav/三体.mobi", "/dav/三体.mobi", "三体", header)
+        assertEquals(BookFormat.MOBI, byPath.format)
+        assertEquals(BookKind.NOVEL, byPath.format.kind())
+        val byMagic = WebDavBooks.resolve("TXT", "NOVEL", "/dav/三体", "/dav/三体", "三体", header)
+        assertEquals(BookFormat.MOBI, byMagic.format)
+        val azw3 = WebDavBooks.resolve("TXT", "NOVEL", "/dav/三体.azw3", "/dav/三体.azw3", "三体", header)
+        assertEquals(BookFormat.AZW3, azw3.format)
+        val azw = WebDavBooks.resolve("TXT", "NOVEL", "/dav/三体.azw", "/dav/三体.azw", "三体", header)
+        assertEquals(BookFormat.MOBI, azw.format)
+    }
+
+    @Test
     fun webDavRemotePathIsNotALocalFile() {
         val exists = { path: String -> path == "/dav/a.cbz" || path == "/data/book.txt" }
         assertNull(
