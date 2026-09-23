@@ -235,8 +235,19 @@ object MobiParser {
     }
 
     private fun collectImages(bytes: ByteArray, offsets: IntArray, headerIndex: Int): List<ByteArray> {
-        val header = safeRecord(bytes, offsets, headerIndex)
-        val ranged = if (header != null) imagesFromHeader(bytes, offsets, headerIndex, header) else emptyList()
+        var ranged = emptyList<ByteArray>()
+        val preferred = safeRecord(bytes, offsets, headerIndex)
+        if (preferred != null) {
+            ranged = imagesFromHeader(bytes, offsets, headerIndex, preferred)
+        }
+        // A joint file's longer text header can point at a shorter image run.
+        // Keep the longest run instead of only the header that won the text score.
+        for (start in headerStarts(bytes, offsets)) {
+            if (start == headerIndex) continue
+            val header = safeRecord(bytes, offsets, start) ?: continue
+            val candidate = imagesFromHeader(bytes, offsets, start, header)
+            if (candidate.size > ranged.size) ranged = candidate
+        }
         if (ranged.isNotEmpty()) return ranged
         val found = ArrayList<ByteArray>()
         for (index in 0 until offsets.size) {

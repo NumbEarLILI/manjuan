@@ -482,6 +482,56 @@ class MobiParserTest {
     }
 
     @Test
+    fun jointMobiKeepsTheLongerImageRunWhenKf8TextWins() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val shortText = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val longText = "<p>第一章潮水很深，船还在江心。后文还在这里。</p>".toByteArray(Charsets.UTF_8)
+        val shell = mobiHeader(
+            compression = 1,
+            encoding = 65001,
+            textRecords = 1,
+            textLength = shortText.size,
+            extraFlags = null,
+            firstImage = 2,
+        )
+        val body = mobiHeader(
+            compression = 1,
+            encoding = 65001,
+            textRecords = 1,
+            textLength = longText.size,
+            extraFlags = null,
+            firstImage = 9,
+        )
+        val file = File.createTempFile("manjuan", ".mobi")
+        file.writeBytes(
+            pdb(
+                listOf(
+                    shell,
+                    shortText,
+                    png,
+                    png,
+                    png,
+                    gif,
+                    "BOUNDARY".toByteArray(Charsets.US_ASCII),
+                    body,
+                    longText,
+                    png,
+                    png,
+                    gif,
+                ),
+            ),
+        )
+        val pages = MobiParser.imagePages(file)
+        assertEquals(4, pages.size)
+        assertEquals(listOf("png", "png", "png", "gif"), pages.map { ImageSniff.extension(it) })
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
     fun huffAfterPagebreakShellStillReportsHuff() {
         val shell = "<html><body><mbp:pagebreak/></body></html>".toByteArray(Charsets.UTF_8)
         val file = writeHybrid(
@@ -653,6 +703,7 @@ class MobiParserTest {
         textLength: Int,
         extraFlags: Int?,
         title: String = "测试",
+        firstImage: Int = 0,
     ): ByteArray {
         val titleBytes = title.toByteArray(Charsets.UTF_8)
         val headerSize = if (extraFlags == null) 144 else 0xF4
@@ -661,6 +712,7 @@ class MobiParserTest {
         put32(header, 4, textLength)
         put16(header, 8, textRecords)
         put16(header, 10, 4096)
+        put32(header, 0x6C, firstImage)
         "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 16)
         put32(header, 20, if (extraFlags == null) 128 else 0xE8)
         put32(header, 24, 2)
