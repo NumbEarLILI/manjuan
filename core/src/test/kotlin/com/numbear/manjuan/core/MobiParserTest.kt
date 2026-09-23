@@ -310,7 +310,7 @@ class MobiParserTest {
             MobiParser.imagePages(file)
             fail("expected UnsupportedBookException")
         } catch (error: UnsupportedBookException) {
-            assertTrue(error.message.orEmpty().contains("没有解出可显示的图片"))
+            assertTrue(error.message.orEmpty().contains("没有可显示的图片"))
             assertNoTagSoup(error.message.orEmpty())
         }
         file.delete()

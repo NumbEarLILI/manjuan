@@ -396,7 +396,7 @@ class LibraryRepository(
                 val opening = MobiParser.opening(file)
                 if (opening.pictureBook) {
                     if (opening.images.isEmpty()) {
-                        throw UnsupportedBookException("这本 MOBI 是图片页，但没有解出可显示的图片")
+                        throw UnsupportedBookException("这本 MOBI 是图片书，但没有可显示的图片")
                     }
                     kind = BookKind.COMIC
                 }

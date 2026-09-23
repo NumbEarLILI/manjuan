@@ -72,7 +72,7 @@ object MobiParser {
         if (opening.pictureBook) {
             throw UnsupportedBookException(
                 if (opening.images.isEmpty()) {
-                    "这本 MOBI 是图片页，但没有解出可显示的图片"
+                    "这本 MOBI 是图片书，但没有可显示的图片"
                 } else {
                     "这本 MOBI 是图片页，不能当小说打开"
                 },
@@ -84,7 +84,7 @@ object MobiParser {
     fun imagePages(file: File): List<ByteArray> {
         val opening = opening(file)
         if (opening.images.isEmpty()) {
-            throw UnsupportedBookException("这本 MOBI 是图片页，但没有解出可显示的图片")
+            throw UnsupportedBookException("这本 MOBI 是图片书，但没有可显示的图片")
         }
         return opening.images
     }
