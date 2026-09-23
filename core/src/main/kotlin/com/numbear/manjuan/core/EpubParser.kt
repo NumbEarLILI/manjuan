@@ -37,11 +37,29 @@ object EpubParser {
                 if (!isHtml(item)) continue
                 val href = resolveZipPath(base, item.href.substringBefore('#'))
                 val bytes = zip.readBytes(href) ?: continue
-                val plain = HtmlText.toPlain(decodeXml(bytes))
-                if (plain.isBlank()) continue
+                val chapterDir = href.substringBeforeLast('/', "")
+                val spans = ArrayList<NovelSpan>()
+                for (block in HtmlText.blocks(decodeXml(bytes))) {
+                    when (block) {
+                        is HtmlText.Block.Text -> {
+                            val plain = HtmlText.toPlain(block.html)
+                            if (plain.isNotBlank()) spans += NovelSpan.Prose(plain)
+                        }
+                        is HtmlText.Block.Image -> {
+                            val imagePath = resolveZipPath(chapterDir, block.href)
+                            val image = zip.readBytes(imagePath) ?: continue
+                            val payload = ImageSniff.extract(image) ?: continue
+                            spans += NovelSpan.Plate(payload)
+                        }
+                    }
+                }
+                if (spans.isEmpty()) continue
+                val plain = spans.filterIsInstance<NovelSpan.Prose>().joinToString("\n") { it.text }
                 val heading = Regex("(?m)^(.{1,40})$").find(plain)?.value?.trim().orEmpty()
-                val chapterTitle = heading.ifBlank { href.substringAfterLast('/') }
-                chapters += NovelChapter(chapterTitle, plain)
+                val chapterTitle = heading.ifBlank {
+                    if (spans.any { it is NovelSpan.Plate }) "彩页" else href.substringAfterLast('/')
+                }
+                chapters += NovelChapter(chapterTitle, plain, spans)
             }
             if (chapters.isEmpty()) throw UnsupportedBookException("EPUB 里没有可阅读的章节")
             return NovelContent(title, author, chapters)

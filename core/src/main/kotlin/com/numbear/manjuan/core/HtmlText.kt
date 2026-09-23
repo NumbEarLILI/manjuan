@@ -1,12 +1,47 @@
 package com.numbear.manjuan.core
 
 object HtmlText {
+    private val imageTag = Regex("(?is)<(img|image)\\b([^>]*)>")
+    private val hrefAttr = Regex("(?i)\\b(?:src|href)\\s*=\\s*['\"]([^'\"]+)['\"]")
+
+    sealed class Block {
+        data class Text(val html: String) : Block()
+        data class Image(val href: String) : Block()
+    }
+
+    fun blocks(html: String): List<Block> {
+        val blocks = ArrayList<Block>()
+        var cursor = 0
+        for (match in imageTag.findAll(html)) {
+            if (match.range.first > cursor) {
+                blocks += Block.Text(html.substring(cursor, match.range.first))
+            }
+            val href = hrefAttr.find(match.groupValues[2])?.groupValues?.get(1)
+                ?.substringBefore('#')
+                ?.trim()
+                .orEmpty()
+            if (href.isNotEmpty() && !href.startsWith("data:", ignoreCase = true)) {
+                blocks += Block.Image(href)
+            }
+            cursor = match.range.last + 1
+        }
+        if (cursor < html.length) blocks += Block.Text(html.substring(cursor))
+        return blocks
+    }
+
     fun toPlain(html: String): String {
         var text = html
-        text = text.replace(Regex("(?is)<(script|style).*?>.*?</\\1>"), " ")
+        text = text.replace(Regex("(?is)<(script|style|guide)\\b[^>]*>.*?</\\1>"), " ")
         text = text.replace(Regex("(?i)<br\\s*/?>"), "\n")
         text = text.replace(Regex("(?i)</(p|div|h[1-6]|li|tr|blockquote)>"), "\n")
-        text = text.replace(Regex("(?i)<[^>]+>"), "")
+        text = text.replace(Regex("(?is)<[^>]+>"), " ")
+        text = text.replace(Regex("(?i)<img\\b[^>]{0,240}"), " ")
+        text = text.replace(Regex("(?i)</?mbp:[^>\\s]{0,80}"), " ")
+        text = text.replace(Regex("(?i)\\bmbp:[a-z0-9:_-]*"), " ")
+        text = text.replace(Regex("(?i)\\balt\\s*=\\s*\"[^\"]*\""), " ")
+        text = text.replace(Regex("(?i)\\balt\\s*=\\s*'[^']*'"), " ")
+        text = text.replace(Regex("(?i)\\balt\\s*=\\s*[^\\s\"'<>]*"), " ")
+        text = text.replace(Regex("(?i)\\b(?:recindex|filepos)\\s*=\\s*(?:\"[^\"]*\"|'[^']*'|\\S*)"), " ")
         text = unescape(text)
         text = text.replace('\u00A0', ' ')
         text = text.replace(Regex("[ \\t\\u3000]+"), " ")

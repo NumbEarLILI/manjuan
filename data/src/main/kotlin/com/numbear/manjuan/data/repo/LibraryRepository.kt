@@ -12,6 +12,7 @@ import com.numbear.manjuan.core.CbrExtractor
 import com.numbear.manjuan.core.EpubParser
 import com.numbear.manjuan.core.FolderImport
 import com.numbear.manjuan.core.FormatDetector
+import com.numbear.manjuan.core.ImageSniff
 import com.numbear.manjuan.core.LibraryNames
 import com.numbear.manjuan.core.MobiParser
 import com.numbear.manjuan.core.NovelChapter
@@ -389,7 +390,17 @@ class LibraryRepository(
                 header = sniffCached(fresh),
                 cachedImageCount = cachedImageCount(fresh),
             )
-            val kind = resolved.format.kind() ?: throw UnsupportedBookException("无法打开这种书")
+            var kind = resolved.format.kind() ?: throw UnsupportedBookException("无法打开这种书")
+            if (resolved.format == BookFormat.MOBI || resolved.format == BookFormat.AZW3) {
+                val file = ensureFile(fresh, onProgress)
+                val opening = MobiParser.opening(file)
+                if (opening.pictureBook) {
+                    if (opening.images.isEmpty()) {
+                        throw UnsupportedBookException("这本 MOBI 是图片页，但没有解出可显示的图片")
+                    }
+                    kind = BookKind.COMIC
+                }
+            }
             if (fresh.format != resolved.format.name || fresh.kind != kind.name) {
                 database.books().update(fresh.copy(format = resolved.format.name, kind = kind.name))
             }
@@ -464,6 +475,19 @@ class LibraryRepository(
                     val existing = sortedImages(dir)
                     val files = existing.ifEmpty { CbrExtractor.extractImages(file, dir) }
                     PagedContent(book.title, format, files.map { PageRef.FilePage(it.absolutePath) }, null, 0)
+                }
+                BookFormat.MOBI, BookFormat.AZW3 -> {
+                    val file = ensureFile(book, onProgress)
+                    val images = MobiParser.imagePages(file)
+                    val dir = File(context.filesDir, "cache-books/${book.id}/mobi-pages")
+                    dir.mkdirs()
+                    dir.listFiles()?.forEach { it.delete() }
+                    val pages = images.mapIndexed { index, bytes ->
+                        val out = File(dir, "page-%04d.${ImageSniff.extension(bytes)}".format(index + 1))
+                        out.writeBytes(bytes)
+                        PageRef.FilePage(out.absolutePath)
+                    }
+                    PagedContent(book.title, format, pages, null, 0)
                 }
                 BookFormat.IMAGE_FOLDER -> {
                     val cached = sortedImages(File(book.cachedPath))

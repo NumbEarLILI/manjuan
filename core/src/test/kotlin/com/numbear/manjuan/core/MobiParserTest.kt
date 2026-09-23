@@ -90,6 +90,100 @@ class MobiParserTest {
     }
 
     @Test
+    fun zeroTextRecordCountUsesFirstNonText() {
+        val part1 = "hello"
+        val part2 = "潮水"
+        val trailer = byteArrayOf('Q'.code.toByte(), 0x01, 'Z'.code.toByte(), 0x82.toByte())
+        val record1 = palmDocLiterals(part1.toByteArray(Charsets.UTF_8)) + trailer
+        val record2 = palmDocLiterals(part2.toByteArray(Charsets.UTF_8)) + trailer
+        val textLength = part1.toByteArray(Charsets.UTF_8).size + part2.toByteArray(Charsets.UTF_8).size
+        val file = writeMobi(
+            compression = 2,
+            encoding = 65001,
+            records = listOf(record1, record2),
+            textLength = textLength,
+            extraFlags = 0x0003,
+            textRecordCount = 0,
+            firstNonText = 3,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertEquals("hello潮水", text)
+        file.delete()
+    }
+
+    @Test
+    fun shortRecordCountThatStopsBeforeTheBodyUsesFirstNonText() {
+        val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
+        val body = "<p>潮水</p>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(shell, body),
+            textLength = shell.size,
+            extraFlags = null,
+            textRecordCount = 1,
+            firstNonText = 3,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        file.delete()
+    }
+
+    @Test
+    fun mobi7StubDoesNotHideLongerKf8TextBehindBoundary() {
+        val stub = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val body = "<p>第一章潮水很深，船还在江心。</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = stub,
+            bodyCompression = 1,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(body),
+            bodyTextLength = body.size,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun longerMobi7TextBeatsAShorterLaterHeader() {
+        val book = "<p>第一章潮水很深，船还在江心。</p>".toByteArray(Charsets.UTF_8)
+        val stub = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = book,
+            bodyCompression = 1,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(stub),
+            bodyTextLength = stub.size,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun readableMobi7IsKeptWhenTheKf8HalfIsHuff() {
+        val book = "<p>潮水</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = book,
+            bodyCompression = 17480,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(byteArrayOf(1)),
+            bodyTextLength = 1,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        file.delete()
+    }
+
+    @Test
     fun kf8BodyAfterEmptyShellIsNotReportedAsEmpty() {
         val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
         val part1 = "hello"
@@ -137,6 +231,66 @@ class MobiParserTest {
     }
 
     @Test
+    fun novelMobiDropsMarkupSoupButKeepsProse() {
+        val html = "<p>第一章潮水很深，船还在江心。</p><mbp:pagebreak/><img recindex=\"00001\" alt=\"彩页".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(!opening.pictureBook)
+        val text = opening.novel!!.chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        assertTrue(!text.contains("mbp:"))
+        assertTrue(!text.contains("alt="))
+        assertTrue(!text.contains("<"))
+        assertTrue(!text.contains("recindex"))
+        file.delete()
+    }
+
+    @Test
+    fun imageOnlyMobiIsAPictureBookWithDecodablePages() {
+        val png = tinyPng()
+        val html = "<img recindex=\"00001\"/><mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(1, opening.images.size)
+        assertTrue(opening.images[0].contentEquals(png))
+        val decoded = javax.imageio.ImageIO.read(opening.images[0].inputStream())
+        assertTrue(decoded != null && decoded.width == 1 && decoded.height == 1)
+        assertChinese(file, "图片页")
+        assertChinese(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun imageMarkupWithoutBytesIsAChineseErrorNotSoup() {
+        val html = "<img recindex=\"00001\" alt=\"彩页\"/><mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        assertChinese(file, "没有解出可显示的图片")
+        file.delete()
+    }
+
+    @Test
     fun undecodableBytesAreNotShownAsChapters() {
         val bytes = ByteArray(64) { 0xFF.toByte() }
         val file = writeMobi(compression = 1, encoding = 65001, records = listOf(bytes), textLength = bytes.size, extraFlags = null)
@@ -180,15 +334,21 @@ class MobiParserTest {
         extraFlags: Int?,
         encryption: Int = 0,
         title: String = "测试",
+        textRecordCount: Int? = null,
+        firstNonText: Int = 0,
+        extraRecords: List<ByteArray> = emptyList(),
+        firstImage: Int = 0,
     ): File {
         val titleBytes = title.toByteArray(Charsets.UTF_8)
         val headerSize = if (extraFlags == null) 144 else 0xF4
         val header = ByteArray(headerSize + titleBytes.size)
         put16(header, 0, compression)
         put32(header, 4, textLength)
-        put16(header, 8, records.size)
+        put16(header, 8, textRecordCount ?: records.size)
         put16(header, 10, 4096)
         put16(header, 12, encryption)
+        put32(header, 0x50, firstNonText)
+        put32(header, 0x6C, firstImage)
         "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 16)
         put32(header, 20, if (extraFlags == null) 128 else 0xE8)
         put32(header, 24, 2)
@@ -201,7 +361,7 @@ class MobiParserTest {
         }
         titleBytes.copyInto(header, headerSize)
 
-        val recordCount = records.size + 1
+        val recordCount = records.size + extraRecords.size + 1
         val pdb = ByteArray(78 + recordCount * 8)
         "Book".toByteArray(Charsets.US_ASCII).copyInto(pdb, 0)
         "BOOK".toByteArray(Charsets.US_ASCII).copyInto(pdb, 60)
@@ -213,6 +373,11 @@ class MobiParserTest {
         put32(pdb, 78, pdb.size)
         records.forEachIndexed { index, record ->
             put32(pdb, 78 + (index + 1) * 8, cursor)
+            blobs += record
+            cursor += record.size
+        }
+        extraRecords.forEachIndexed { index, record ->
+            put32(pdb, 78 + (records.size + 1 + index) * 8, cursor)
             blobs += record
             cursor += record.size
         }
@@ -228,6 +393,7 @@ class MobiParserTest {
         bodyRecords: List<ByteArray>,
         bodyTextLength: Int,
         bodyFlags: Int?,
+        boundary: Boolean = false,
     ): File {
         val shellHeader = mobiHeader(
             compression = 1,
@@ -246,6 +412,7 @@ class MobiParserTest {
         val blobs = ArrayList<ByteArray>()
         blobs += shellHeader
         blobs += shell
+        if (boundary) blobs += "BOUNDARY".toByteArray(Charsets.US_ASCII)
         blobs += bodyHeader
         blobs += bodyRecords
         val file = File.createTempFile("manjuan", ".mobi")
