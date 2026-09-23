@@ -74,6 +74,59 @@ class MobiParserTest {
     }
 
     @Test
+    fun trailerThatConsumesTheRecordStillKeepsBodyText() {
+        val html = "<p>潮水</p>".toByteArray(Charsets.UTF_8)
+        val record = html + byteArrayOf((0x80 or (html.size + 1)).toByte())
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(record),
+            textLength = html.size,
+            extraFlags = 0x0002,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        file.delete()
+    }
+
+    @Test
+    fun kf8BodyAfterEmptyShellIsNotReportedAsEmpty() {
+        val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
+        val part1 = "hello"
+        val part2 = "潮水"
+        val trailer = byteArrayOf('Q'.code.toByte(), 0x01, 'Z'.code.toByte(), 0x82.toByte())
+        val record1 = palmDocLiterals(part1.toByteArray(Charsets.UTF_8)) + trailer
+        val record2 = palmDocLiterals(part2.toByteArray(Charsets.UTF_8)) + trailer
+        val textLength = part1.toByteArray(Charsets.UTF_8).size + part2.toByteArray(Charsets.UTF_8).size
+        val file = writeHybrid(
+            shell = shell,
+            bodyCompression = 2,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(record1, record2),
+            bodyTextLength = textLength,
+            bodyFlags = 0x0003,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertEquals("hello潮水", text)
+        file.delete()
+    }
+
+    @Test
+    fun emptyShellWithHuffBodyReportsHuffNotEmptyText() {
+        val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = shell,
+            bodyCompression = 17480,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(byteArrayOf(1)),
+            bodyTextLength = 1,
+            bodyFlags = null,
+        )
+        assertChinese(file, "Huff")
+        file.delete()
+    }
+
+    @Test
     fun huffAndEncryptedMobiFailInChinese() {
         val huff = writeMobi(compression = 17480, encoding = 65001, records = listOf(byteArrayOf(1)), textLength = 1, extraFlags = null)
         val encrypted = writeMobi(compression = 2, encoding = 65001, records = listOf(palmDocLiterals("hello".toByteArray())), textLength = 5, extraFlags = null, encryption = 1)
@@ -166,6 +219,83 @@ class MobiParserTest {
         val file = File.createTempFile("manjuan", ".mobi")
         file.writeBytes(pdb + blobs.reduce { left, right -> left + right })
         return file
+    }
+
+    private fun writeHybrid(
+        shell: ByteArray,
+        bodyCompression: Int,
+        bodyEncoding: Int,
+        bodyRecords: List<ByteArray>,
+        bodyTextLength: Int,
+        bodyFlags: Int?,
+    ): File {
+        val shellHeader = mobiHeader(
+            compression = 1,
+            encoding = 65001,
+            textRecords = 1,
+            textLength = shell.size,
+            extraFlags = null,
+        )
+        val bodyHeader = mobiHeader(
+            compression = bodyCompression,
+            encoding = bodyEncoding,
+            textRecords = bodyRecords.size,
+            textLength = bodyTextLength,
+            extraFlags = bodyFlags,
+        )
+        val blobs = ArrayList<ByteArray>()
+        blobs += shellHeader
+        blobs += shell
+        blobs += bodyHeader
+        blobs += bodyRecords
+        val file = File.createTempFile("manjuan", ".mobi")
+        file.writeBytes(pdb(blobs))
+        return file
+    }
+
+    private fun mobiHeader(
+        compression: Int,
+        encoding: Int,
+        textRecords: Int,
+        textLength: Int,
+        extraFlags: Int?,
+        title: String = "测试",
+    ): ByteArray {
+        val titleBytes = title.toByteArray(Charsets.UTF_8)
+        val headerSize = if (extraFlags == null) 144 else 0xF4
+        val header = ByteArray(headerSize + titleBytes.size)
+        put16(header, 0, compression)
+        put32(header, 4, textLength)
+        put16(header, 8, textRecords)
+        put16(header, 10, 4096)
+        "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 16)
+        put32(header, 20, if (extraFlags == null) 128 else 0xE8)
+        put32(header, 24, 2)
+        put32(header, 28, encoding)
+        put32(header, 16 + 0x44, headerSize)
+        put32(header, 16 + 0x48, titleBytes.size)
+        if (extraFlags != null) {
+            put32(header, 0x68, 6)
+            put16(header, 0xF2, extraFlags)
+        }
+        titleBytes.copyInto(header, headerSize)
+        return header
+    }
+
+    private fun pdb(records: List<ByteArray>): ByteArray {
+        val pdb = ByteArray(78 + records.size * 8)
+        "Book".toByteArray(Charsets.US_ASCII).copyInto(pdb, 0)
+        "BOOK".toByteArray(Charsets.US_ASCII).copyInto(pdb, 60)
+        "MOBI".toByteArray(Charsets.US_ASCII).copyInto(pdb, 64)
+        put16(pdb, 76, records.size)
+        var cursor = pdb.size
+        val blobs = ArrayList<ByteArray>()
+        records.forEachIndexed { index, record ->
+            put32(pdb, 78 + index * 8, cursor)
+            blobs += record
+            cursor += record.size
+        }
+        return pdb + blobs.reduce { left, right -> left + right }
     }
 
     private fun put16(bytes: ByteArray, offset: Int, value: Int) {

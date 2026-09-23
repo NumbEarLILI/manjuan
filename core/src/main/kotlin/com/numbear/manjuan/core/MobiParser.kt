@@ -11,6 +11,7 @@ object MobiParser {
     private val gb18030: Charset = Charset.forName("GB18030")
     private val windows1252: Charset = Charset.forName("windows-1252")
     private val charsetMeta = Regex("""charset\s*=\s*["']?\s*([A-Za-z0-9._+-]+)""", RegexOption.IGNORE_CASE)
+    private const val MIN_READABLE = 2
 
     fun parse(file: File): NovelContent {
         val bytes = file.readBytes()
@@ -19,16 +20,80 @@ object MobiParser {
         }
         val offsets = pdbOffsets(bytes)
         if (offsets.isEmpty()) throw UnsupportedBookException("MOBI 记录表是空的")
-        val header = recordBytes(bytes, offsets, 0)
-        if (header.size < 16) throw UnsupportedBookException("MOBI 文件头损坏")
+        val starts = headerStarts(bytes, offsets)
+        var best: Extracted? = null
+        var primaryStop: UnsupportedBookException? = null
+        var sawHuff = false
+        var sawEncrypted = false
+        var sawUndecodable = false
+        starts.forEachIndexed { index, start ->
+            when (val attempt = readSection(bytes, offsets, start, file.nameWithoutExtension)) {
+                is Attempt.Text -> if (best == null || attempt.extracted.score > best!!.score) {
+                    best = attempt.extracted
+                }
+                is Attempt.Stop -> {
+                    if (index == 0) primaryStop = attempt.error
+                    val message = attempt.error.message.orEmpty()
+                    when {
+                        message.contains("Huff") -> sawHuff = true
+                        message.contains("加密") -> sawEncrypted = true
+                        message.contains("解码") -> sawUndecodable = true
+                    }
+                }
+                Attempt.None -> Unit
+            }
+            if (index == 0 && best != null && best!!.score >= MIN_READABLE) return best!!.toNovel()
+        }
+        best?.takeIf { it.score >= MIN_READABLE }?.let { return it.toNovel() }
+        if (sawHuff) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
+        if (sawEncrypted) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
+        if (sawUndecodable) throw UnsupportedBookException("无法解码这本 MOBI 的正文")
+        primaryStop?.let { throw it }
+        throw UnsupportedBookException("没有从 MOBI 中提取到正文")
+    }
+
+    /**
+     * Kindlegen joint files put an empty MOBI7 shell in front of the KF8 header.
+     * Huff/CDIC text, DRM, and fragment text that exists only in an INDX (not in the
+     * raw text records) still cannot be turned into chapters.
+     */
+    private fun headerStarts(bytes: ByteArray, offsets: IntArray): List<Int> {
+        val starts = ArrayList<Int>(2)
+        starts += 0
+        for (index in 1 until offsets.size) {
+            val record = safeRecord(bytes, offsets, index) ?: continue
+            if (isEmbeddedHeader(record)) starts += index
+        }
+        return starts
+    }
+
+    private fun isEmbeddedHeader(record: ByteArray): Boolean {
+        if (record.size < 32) return false
+        if (record.copyOfRange(16, 20).toString(Charsets.US_ASCII) != "MOBI") return false
+        val compression = u16(record, 0)
+        if (compression != 1 && compression != 2 && compression != 17480) return false
+        val headerLength = u32(record, 20)
+        return headerLength in 16..4096
+    }
+
+    private fun readSection(
+        bytes: ByteArray,
+        offsets: IntArray,
+        headerIndex: Int,
+        fallbackTitle: String,
+    ): Attempt {
+        val header = safeRecord(bytes, offsets, headerIndex) ?: return Attempt.Stop(
+            UnsupportedBookException("MOBI 文件不完整或已损坏"),
+        )
+        if (header.size < 16) return Attempt.Stop(UnsupportedBookException("MOBI 文件头损坏"))
         val compression = u16(header, 0)
         val textLength = u32(header, 4)
         val textRecordCount = u16(header, 8)
         val encryption = u16(header, 12)
-        if (encryption != 0) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
-        if (compression == 17480) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
+        if (encryption != 0) return Attempt.Stop(UnsupportedBookException("此 MOBI 已加密，暂不支持"))
+        if (compression == 17480) return Attempt.Stop(UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持"))
         if (compression != 1 && compression != 2) {
-            throw UnsupportedBookException("此 MOBI 使用了暂不支持的压缩方式（$compression）")
+            return Attempt.Stop(UnsupportedBookException("此 MOBI 使用了暂不支持的压缩方式（$compression）"))
         }
         val encoding = if (header.size >= 32 && header.copyOfRange(16, 20).toString(Charsets.US_ASCII) == "MOBI") {
             u32(header, 28)
@@ -36,27 +101,95 @@ object MobiParser {
             65001
         }
         val flags = extraFlags(header)
-        val count = textRecordCount.coerceAtMost(offsets.size - 1)
+        val stripped = decompressText(bytes, offsets, headerIndex, textRecordCount, compression, flags)
+            ?: return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
+        val raw = if (flags == 0) {
+            stripped
+        } else {
+            decompressText(bytes, offsets, headerIndex, textRecordCount, compression, 0)
+                ?: return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
+        }
+        var bestPlain = ""
+        var bestScore = 0
+        var sawDecodeFailure = false
+        var longest = 0
+        val buffers = if (flags == 0) listOf(stripped) else listOf(stripped, raw)
+        for (buffer in buffers) {
+            if (buffer.size > longest) longest = buffer.size
+            if (textLength > buffer.size && textLength - buffer.size > 4096) continue
+            val sliced = if (textLength in 1..buffer.size) buffer.copyOf(textLength) else buffer
+            for (candidate in listOf(sliced, buffer)) {
+                when (val decoded = plainText(candidate, encoding)) {
+                    null -> sawDecodeFailure = true
+                    else -> {
+                        val score = readableScore(decoded)
+                        if (score > bestScore) {
+                            bestScore = score
+                            bestPlain = decoded
+                        }
+                    }
+                }
+            }
+            if (buffer === stripped && bestScore >= MIN_READABLE) break
+        }
+        if (bestScore >= MIN_READABLE) {
+            val title = readFullName(header, encoding) ?: fallbackTitle
+            return Attempt.Text(Extracted(bestPlain, title, bestScore))
+        }
+        if (textLength > longest && textLength - longest > 4096) {
+            return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
+        }
+        if (sawDecodeFailure) return Attempt.Stop(UnsupportedBookException("无法解码这本 MOBI 的正文"))
+        return Attempt.None
+    }
+
+    private fun decompressText(
+        bytes: ByteArray,
+        offsets: IntArray,
+        headerIndex: Int,
+        textRecordCount: Int,
+        compression: Int,
+        flags: Int,
+    ): ByteArray? {
+        val count = textRecordCount.coerceAtMost(offsets.size - headerIndex - 1)
         val joined = ByteArrayOutputStream()
-        for (index in 1..count) {
-            val raw = recordBytes(bytes, offsets, index)
+        for (index in headerIndex + 1..headerIndex + count) {
+            val raw = safeRecord(bytes, offsets, index) ?: return null
             val payload = stripTrailers(raw, flags)
             val decoded = if (compression == 2) PalmDoc.decompress(payload) else payload
             joined.write(decoded)
         }
-        val all = joined.toByteArray()
-        if (textLength > all.size && textLength - all.size > 4096) {
-            throw UnsupportedBookException("MOBI 文件不完整或已损坏")
+        return joined.toByteArray()
+    }
+
+    private fun plainText(bytes: ByteArray, encoding: Int): String? {
+        if (bytes.isEmpty()) return ""
+        val decoded = try {
+            decodeBody(bytes, encoding)
+        } catch (_: UnsupportedBookException) {
+            return null
         }
-        val textBytes = if (textLength in 1..all.size) all.copyOf(textLength) else all
-        val decoded = decodeBody(textBytes, encoding)
-        val plain = HtmlText.toPlain(stripControls(decoded))
-        if (plain.isBlank()) throw UnsupportedBookException("没有从 MOBI 中提取到正文")
-        val title = readFullName(header, encoding) ?: file.nameWithoutExtension
-        val chapters = TxtChapters.split(plain).map { chapter ->
-            NovelChapter(chapter.title, plain.substring(chapter.start, chapter.end).trim())
+        return HtmlText.toPlain(stripControls(decoded))
+    }
+
+    private fun readableScore(plain: String): Int {
+        if (plain.isBlank()) return 0
+        return plain.count { it.isLetter() }
+    }
+
+    private data class Extracted(val plain: String, val title: String, val score: Int) {
+        fun toNovel(): NovelContent {
+            val chapters = TxtChapters.split(plain).map { chapter ->
+                NovelChapter(chapter.title, plain.substring(chapter.start, chapter.end).trim())
+            }
+            return NovelContent(title, "", chapters.ifEmpty { listOf(NovelChapter("正文", plain)) })
         }
-        return NovelContent(title, "", chapters.ifEmpty { listOf(NovelChapter("正文", plain)) })
+    }
+
+    private sealed interface Attempt {
+        data class Text(val extracted: Extracted) : Attempt
+        data class Stop(val error: UnsupportedBookException) : Attempt
+        data object None : Attempt
     }
 
     /**
@@ -86,17 +219,17 @@ object MobiParser {
         while (bits != 0) {
             if (bits and 1 != 0) {
                 val entry = trailingEntrySize(data, data.size - num)
-                if (entry <= 0 || entry > data.size - num) return 0
+                if (entry <= 0 || entry > data.size - num) break
                 num += entry
             }
             bits = bits ushr 1
         }
         if (flags and 1 != 0) {
             val off = data.size - num - 1
-            if (off < 0) return 0
-            val extra = (data[off].toInt() and 0x3) + 1
-            if (num + extra > data.size) return 0
-            num += extra
+            if (off >= 0) {
+                val extra = (data[off].toInt() and 0x3) + 1
+                if (num + extra <= data.size) num += extra
+            }
         }
         return num
     }
@@ -241,12 +374,11 @@ object MobiParser {
         return IntArray(count) { index -> u32(bytes, 78 + index * 8) }
     }
 
-    private fun recordBytes(bytes: ByteArray, offsets: IntArray, index: Int): ByteArray {
+    private fun safeRecord(bytes: ByteArray, offsets: IntArray, index: Int): ByteArray? {
+        if (index < 0 || index >= offsets.size) return null
         val start = offsets[index]
         val end = if (index + 1 < offsets.size) offsets[index + 1] else bytes.size
-        if (start < 0 || end > bytes.size || start > end) {
-            throw UnsupportedBookException("MOBI 文件不完整或已损坏")
-        }
+        if (start < 0 || end > bytes.size || start > end) return null
         return bytes.copyOfRange(start, end)
     }
 
