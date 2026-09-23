@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
                 "LANDSCAPE" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
-            ManjuanTheme {
+            ManjuanTheme(appearance = settings.appearance) {
                 CompositionLocalProvider(
                     LocalRegisterVolumeKey provides { handler -> volumeHandler = handler },
                 ) {

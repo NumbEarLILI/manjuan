@@ -21,6 +21,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,7 +37,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -55,7 +55,6 @@ import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
-import com.numbear.manjuan.ui.inkColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,7 +79,7 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     var chrome by remember { mutableStateOf(true) }
     var showMarks by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    val colors = settings.inkColors()
+    val scheme = MaterialTheme.colorScheme
 
     LaunchedEffect(bookId) {
         loading = true
@@ -111,14 +110,14 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(if (book?.pdfFile != null) Color.White else Color.Black)) {
+    Box(Modifier.fillMaxSize().background(scheme.background)) {
         when {
             loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
-                Text(error!!, color = colors.foreground)
+                Text(error!!, color = scheme.onBackground)
                 TextButton(onClick = onBack) { Text("返回书架") }
             }
-            book != null && count == 0 -> Text("没有可显示的页面", Modifier.align(Alignment.Center), color = Color.White)
+            book != null && count == 0 -> Text("没有可显示的页面", Modifier.align(Alignment.Center), color = scheme.onBackground)
             book != null -> {
                 val safePage = page.coerceIn(0, count - 1)
                 if (settings.comicDirection == "VERTICAL") {
@@ -207,17 +206,17 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                             }
                         },
                         onToc = { showMarks = true },
-                        container = Color(0xCC121417),
-                        content = Color(0xFFE7E1D6),
+                        container = scheme.surface,
+                        content = scheme.onSurface,
                     )
                     Column(
-                        Modifier.align(Alignment.BottomCenter).background(Color(0xCC121417)).padding(12.dp),
+                        Modifier.align(Alignment.BottomCenter).background(scheme.surface.copy(alpha = 0.94f)).padding(12.dp),
                     ) {
                         PercentSlider(
                             percent = if (count <= 1) 0f else safePage.toFloat() / (count - 1),
-                            labelColor = Color(0xFFE7E1D6),
+                            labelColor = scheme.onSurface,
                         ) { value -> persist((value * (count - 1)).toInt().coerceIn(0, count - 1)) }
-                        TextButton(onClick = { showSettings = true }) { Text("阅读", color = Color(0xFFE7E1D6)) }
+                        TextButton(onClick = { showSettings = true }) { Text("阅读", color = scheme.onSurface) }
                     }
                 }
             }
@@ -280,7 +279,7 @@ private fun PageBitmap(
     Box(modifier, contentAlignment = Alignment.Center) {
         when {
             bitmap != null -> image(bitmap!!)
-            failed != null -> Text(failed!!, color = Color.White, modifier = Modifier.padding(16.dp))
+            failed != null -> Text(failed!!, color = MaterialTheme.colorScheme.onBackground, modifier = Modifier.padding(16.dp))
             else -> CircularProgressIndicator()
         }
     }
