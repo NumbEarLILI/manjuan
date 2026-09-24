@@ -142,7 +142,7 @@ fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
                     else -> "已用 ${formatBytes(bytes)}"
                 },
             )
-            if (cleared) Text("已清除")
+            if (cleared) Text("已清除，阅读进度和书签仍保留")
             Button(
                 onClick = { confirmClear = true },
                 enabled = !clearing,
@@ -158,7 +158,7 @@ fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
             onDismissRequest = { if (!clearing) confirmClear = false },
             title = { Text("清除缓存") },
             text = {
-                Text("将删除网盘下载的文件，以及阅读时解压生成的临时文件。书架、阅读进度和本机导入的书都会保留。下次打开未缓存的书时会重新下载。")
+                Text("只会删除网盘下载的文件，以及阅读时解压生成的临时文件。阅读进度、书签、书架和本机导入的书都会保留。下次打开未缓存的网盘书时会重新下载。")
             },
             confirmButton = {
                 TextButton(

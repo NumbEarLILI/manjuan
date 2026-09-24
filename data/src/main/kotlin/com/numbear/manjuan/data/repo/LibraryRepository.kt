@@ -66,12 +66,11 @@ class LibraryRepository(
     suspend fun clearCache(): Long = withContext(Dispatchers.IO) {
         val root = File(context.filesDir, BookCache.DIR)
         val freed = BookCache.size(root)
+        val cachedIds = database.books().all()
+            .filter { BookCache.storedInside(root.absolutePath, it.cachedPath) }
+            .map { it.id }
         root.deleteRecursively()
-        database.books().all().forEach { book ->
-            if (BookCache.storedInside(root.absolutePath, book.cachedPath)) {
-                database.books().update(book.copy(cachedPath = ""))
-            }
-        }
+        cachedIds.forEach { database.books().clearCachedPath(it) }
         freed
     }
 

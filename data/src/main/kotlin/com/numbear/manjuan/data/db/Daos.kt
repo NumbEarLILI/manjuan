@@ -52,6 +52,9 @@ interface BookDao {
 
     @Query("SELECT * FROM books")
     suspend fun all(): List<BookEntity>
+
+    @Query("UPDATE books SET cachedPath = '' WHERE id = :id")
+    suspend fun clearCachedPath(id: Long)
 }
 
 @Dao
