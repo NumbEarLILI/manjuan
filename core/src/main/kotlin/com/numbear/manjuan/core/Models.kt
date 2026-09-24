@@ -39,7 +39,19 @@ data class TextChapter(val title: String, val start: Int, val end: Int)
 
 data class PageSlice(val start: Int, val end: Int, val text: String)
 
-data class NovelChapter(val title: String, val text: String)
+sealed class NovelSpan {
+    data class Prose(val text: String) : NovelSpan()
+    data class Plate(val bytes: ByteArray) : NovelSpan() {
+        override fun equals(other: Any?): Boolean = other is Plate && bytes.contentEquals(other.bytes)
+        override fun hashCode(): Int = bytes.contentHashCode()
+    }
+}
+
+data class NovelChapter(
+    val title: String,
+    val text: String,
+    val spans: List<NovelSpan> = emptyList(),
+)
 
 data class NovelContent(val title: String, val author: String, val chapters: List<NovelChapter>)
 

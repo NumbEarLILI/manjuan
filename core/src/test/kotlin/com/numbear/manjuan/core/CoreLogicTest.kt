@@ -89,9 +89,48 @@ class CoreLogicTest {
         assertTrue(plain.contains("甲&乙"))
         assertTrue(!plain.contains("no"))
         assertTrue(plain.contains("丙"))
+        val soup = HtmlText.toPlain("<p>潮水</p><mbp:pagebreak/><img recindex=\"00001\" alt=\"彩页")
+        assertTrue(soup.contains("潮水"))
+        assertTrue(!soup.contains("mbp:"))
+        assertTrue(!soup.contains("alt="))
+        assertTrue(!soup.contains("<"))
+        assertTrue(!soup.contains("recindex"))
+
+        val shot = HtmlText.toPlain("\uFFFD\"00139\" alt=\"第 138 頁\"/>\n\n<mbp:pa")
+        assertTrue(shot.isBlank())
+        assertNoTagSoup(shot)
+
+        val broken = HtmlText.toPlain(
+            "<p>第一章 潮水很深，船还在江心。</p>\n\uFFFD\"00139\" alt=\"第138章 假标题\"/>\n<mbp:pa\n<p>后文还在。</p>",
+        )
+        assertTrue(broken.contains("潮水"))
+        assertTrue(broken.contains("后文还在"))
+        assertTrue(!broken.contains("假标题"))
+        assertTrue(!broken.contains("00139"))
+        assertTrue(!broken.contains("\uFFFD"))
+        assertNoTagSoup(broken)
+
+        val code = HtmlText.toPlain("<p>see #include &lt;mobi.h&gt; end</p>")
+        assertTrue(code.contains("#include <mobi.h>"))
+        val css = HtmlText.toPlain("封面\n/*\n * Copyright (c) 2014-2024 VOLUME.HK\n */\nhtml{color:#000;}\ndiv.fs {\nheight: 1680px;\n}\nt op: 0.13%;\n潮水")
+        assertTrue(css.contains("封面"))
+        assertTrue(css.contains("潮水"))
+        assertTrue(!css.contains("1680px"))
+        assertTrue(!css.contains("html{"))
+        assertTrue(!css.contains("Copyright"))
+        assertTrue(!css.contains("0.13%"))
 
         val names = listOf("page10.jpg", "page2.jpg", "page1.jpg").sortedWith(NaturalSort)
         assertEquals(listOf("page1.jpg", "page2.jpg", "page10.jpg"), names)
+    }
+
+    private fun assertNoTagSoup(text: String) {
+        assertTrue(text, !text.contains("alt="))
+        assertTrue(text, !text.contains("mbp:"))
+        assertTrue(text, !text.contains("recindex"))
+        assertTrue(text, !text.contains("<"))
+        assertTrue(text, !text.contains("/>"))
+        assertTrue(text, !text.contains("\uFFFD"))
     }
 
     @Test
@@ -128,6 +167,64 @@ class CoreLogicTest {
         assertEquals("作者甲", book.author)
         assertEquals(1, book.chapters.size)
         assertTrue(book.chapters[0].text.contains("正文你好"))
+        file.delete()
+    }
+
+    @Test
+    fun epubColorPlateIsDecodedAndKeptBesideProse() {
+        val png = tinyPng()
+        val file = File.createTempFile("manjuan", ".epub")
+        ZipOutputStream(file.outputStream()).use { zip ->
+            fun put(path: String, bytes: ByteArray) {
+                zip.putNextEntry(ZipEntry(path))
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+            put("mimetype", "application/epub+zip".toByteArray())
+            put(
+                "META-INF/container.xml",
+                """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>""".toByteArray(),
+            )
+            put(
+                "OEBPS/book.opf",
+                """
+                <package xmlns:dc="http://purl.org/dc/elements/1.1/">
+                  <metadata><dc:title>彩页书</dc:title><dc:creator>作者甲</dc:creator></metadata>
+                  <manifest>
+                    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="plate" href="plate.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="img" href="images/plate.png" media-type="image/png"/>
+                  </manifest>
+                  <spine><itemref idref="plate"/><itemref idref="c1"/></spine>
+                </package>
+                """.trimIndent().toByteArray(),
+            )
+            put(
+                "OEBPS/plate.xhtml",
+                """<html><body><img src="images/plate.png" alt="彩页"/></body></html>""".toByteArray(),
+            )
+            put(
+                "OEBPS/c1.xhtml",
+                """<html><body><h1>第一章</h1><p>正文你好</p><img src="images/plate.png" alt="插图"/><p>潮水</p></body></html>""".toByteArray(),
+            )
+            put("OEBPS/images/plate.png", png)
+        }
+        val book = EpubParser.parse(file)
+        assertEquals(2, book.chapters.size)
+        val plate = book.chapters[0]
+        assertEquals("彩页", plate.title)
+        val plateBytes = plate.spans.filterIsInstance<NovelSpan.Plate>().single().bytes
+        assertTrue(plateBytes.contentEquals(png))
+        val decoded = javax.imageio.ImageIO.read(plateBytes.inputStream())
+        assertTrue(decoded != null && decoded.width == 1 && decoded.height == 1)
+        val prose = book.chapters[1]
+        assertTrue(prose.text.contains("正文你好"))
+        assertTrue(prose.text.contains("潮水"))
+        assertTrue(!prose.text.contains("alt="))
+        assertTrue(!prose.text.contains("<img"))
+        val pages = NovelPages.pages(prose, charsPerLine = 40, linesPerPage = 20)
+        assertTrue(pages.any { it is NovelPages.Page.Picture && (it as NovelPages.Page.Picture).bytes.contentEquals(png) })
+        assertTrue(pages.filterIsInstance<NovelPages.Page.Words>().joinToString("") { it.text }.contains("潮水"))
         file.delete()
     }
 

@@ -90,6 +90,100 @@ class MobiParserTest {
     }
 
     @Test
+    fun zeroTextRecordCountUsesFirstNonText() {
+        val part1 = "hello"
+        val part2 = "潮水"
+        val trailer = byteArrayOf('Q'.code.toByte(), 0x01, 'Z'.code.toByte(), 0x82.toByte())
+        val record1 = palmDocLiterals(part1.toByteArray(Charsets.UTF_8)) + trailer
+        val record2 = palmDocLiterals(part2.toByteArray(Charsets.UTF_8)) + trailer
+        val textLength = part1.toByteArray(Charsets.UTF_8).size + part2.toByteArray(Charsets.UTF_8).size
+        val file = writeMobi(
+            compression = 2,
+            encoding = 65001,
+            records = listOf(record1, record2),
+            textLength = textLength,
+            extraFlags = 0x0003,
+            textRecordCount = 0,
+            firstNonText = 3,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertEquals("hello潮水", text)
+        file.delete()
+    }
+
+    @Test
+    fun shortRecordCountThatStopsBeforeTheBodyUsesFirstNonText() {
+        val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
+        val body = "<p>潮水</p>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(shell, body),
+            textLength = shell.size,
+            extraFlags = null,
+            textRecordCount = 1,
+            firstNonText = 3,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        file.delete()
+    }
+
+    @Test
+    fun mobi7StubDoesNotHideLongerKf8TextBehindBoundary() {
+        val stub = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val body = "<p>第一章潮水很深，船还在江心。</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = stub,
+            bodyCompression = 1,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(body),
+            bodyTextLength = body.size,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun longerMobi7TextBeatsAShorterLaterHeader() {
+        val book = "<p>第一章潮水很深，船还在江心。</p>".toByteArray(Charsets.UTF_8)
+        val stub = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = book,
+            bodyCompression = 1,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(stub),
+            bodyTextLength = stub.size,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun readableMobi7IsKeptWhenTheKf8HalfIsHuff() {
+        val book = "<p>潮水</p>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = book,
+            bodyCompression = 17480,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(byteArrayOf(1)),
+            bodyTextLength = 1,
+            bodyFlags = null,
+            boundary = true,
+        )
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        file.delete()
+    }
+
+    @Test
     fun kf8BodyAfterEmptyShellIsNotReportedAsEmpty() {
         val shell = "<html><body></body></html>".toByteArray(Charsets.UTF_8)
         val part1 = "hello"
@@ -137,6 +231,467 @@ class MobiParserTest {
     }
 
     @Test
+    fun novelMobiDropsMarkupSoupButKeepsProse() {
+        val html = "<p>第一章潮水很深，船还在江心。</p><mbp:pagebreak/><img recindex=\"00001\" alt=\"彩页".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(!opening.pictureBook)
+        val text = opening.novel!!.chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        assertTrue(!text.contains("mbp:"))
+        assertTrue(!text.contains("alt="))
+        assertTrue(!text.contains("<"))
+        assertTrue(!text.contains("recindex"))
+        file.delete()
+    }
+
+    @Test
+    fun imageOnlyMobiIsAPictureBookWithDecodablePages() {
+        val png = tinyPng()
+        val html = "<img recindex=\"00001\"/><mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        opening.images.forEach { bytes ->
+            assertTrue(bytes.contentEquals(png))
+            val decoded = javax.imageio.ImageIO.read(bytes.inputStream())
+            assertTrue(decoded != null && decoded.width == 1 && decoded.height == 1)
+        }
+        assertChinese(file, "图片页")
+        assertChinese(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun oneImageDoesNotOpenTheBookAsAComic() {
+        val png = tinyPng()
+        val html = "<img recindex=\"00001\"/><mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        assertCleanRefusal(file, "没有从 MOBI 中提取到正文")
+        file.delete()
+    }
+
+    @Test
+    fun imageMarkupWithoutBytesIsAChineseErrorNotSoup() {
+        val html = "<img recindex=\"00001\" alt=\"彩页\"/><mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        assertCleanRefusal(file, "没有从 MOBI 中提取到正文")
+        try {
+            MobiParser.imagePages(file)
+            fail("expected UnsupportedBookException")
+        } catch (error: UnsupportedBookException) {
+            assertTrue(error.message.orEmpty().contains("没有可显示的图片"))
+            assertNoTagSoup(error.message.orEmpty())
+        }
+        file.delete()
+    }
+
+    @Test
+    fun screenshotSoupWithThreeImagesOpensAsPicturePages() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = "\uFFFD\"00139\" alt=\"第 138 頁\"/>\n\n<mbp:pa".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertEquals(listOf("png", "png", "gif"), opening.images.map { ImageSniff.extension(it) })
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun twoImagesDoNotOpenBrokenMarkupAsAComic() {
+        val png = tinyPng()
+        val html = "\uFFFD\"00139\" alt=\"第 138 頁\"/>\n\n<mbp:pa".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png),
+            firstImage = 2,
+        )
+        assertCleanRefusal(file, "没有从 MOBI 中提取到正文")
+        file.delete()
+    }
+
+    @Test
+    fun screenshotSoupWithoutImagesIsChineseRefusalNotMarkup() {
+        val html = "\uFFFD\"00139\" alt=\"第 138 頁\"/>\n\n<mbp:pa".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        assertCleanRefusal(file, "没有从 MOBI 中提取到正文")
+        file.delete()
+    }
+
+    @Test
+    fun pagebreakOnlyMobiWithThreeImagesIsAPictureBook() {
+        val png = tinyPng()
+        val html = "<mbp:pagebreak/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun pagebreakOnlyMobiWithoutImagesRefusesInChinese() {
+        val html = "<mbp:pagebreak/><mbp:pa".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        assertCleanRefusal(file, "没有从 MOBI 中提取到正文")
+        file.delete()
+    }
+
+    @Test
+    fun brokenAltDoesNotBecomeAChapterAndProseSurvives() {
+        val html = (
+            "第一章 潮水\n" +
+                "正文甲很深，船还在江边。\n" +
+                "\uFFFD\"00139\" alt=\"第138章 假标题\"/>\n" +
+                "<mbp:pa\n" +
+                "第二章 江心\n" +
+                "后文还在。\n"
+            ).toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+        )
+        val novel = MobiParser.parse(file)
+        val titles = novel.chapters.map { it.title }
+        assertEquals(listOf("第一章 潮水", "第二章 江心"), titles)
+        val text = novel.chapters.joinToString("\n") { it.text }
+        assertTrue(text.contains("正文甲很深"))
+        assertTrue(text.contains("后文还在"))
+        assertTrue(!text.contains("假标题"))
+        assertTrue(!text.contains("00139"))
+        assertTrue(!text.contains("頁"))
+        assertTrue(!text.contains("\uFFFD"))
+        assertNoTagSoup(text)
+        novel.chapters.forEach { chapter ->
+            assertNoTagSoup(chapter.title)
+            assertNoTagSoup(chapter.text)
+        }
+        file.delete()
+    }
+
+    @Test
+    fun tagSplitAcrossTextRecordsIsStrippedBeforeChapters() {
+        val part1 = "<p>第一章 潮水很深</p><mbp:page".toByteArray(Charsets.UTF_8)
+        val part2 = "break/><p>船还在江心。</p>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(part1, part2),
+            textLength = part1.size + part2.size,
+            extraFlags = null,
+        )
+        val novel = MobiParser.parse(file)
+        val text = novel.chapters.joinToString("\n") { it.text }
+        assertTrue(text.contains("潮水很深"))
+        assertTrue(text.contains("江心"))
+        assertTrue(!text.contains("break"))
+        assertTrue(!text.contains("page"))
+        assertNoTagSoup(text)
+        file.delete()
+    }
+
+    @Test
+    fun pageNumberCaptionsWithImagesOpenAsPagesNotProse() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = (1..4).joinToString("\n") { index ->
+            "<p>第 $index 頁</p><img recindex=\"${index.toString().padStart(5, '0')}\"/><mbp:pagebreak/>"
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertEquals(listOf("png", "png", "gif"), opening.images.map { ImageSniff.extension(it) })
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun barePageNumbersWithImagesOpenAsPagesNotProse() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = (1..4).joinToString("\n") { index ->
+            "<p>${index}页</p><img recindex=\"${index.toString().padStart(5, '0')}\"/><mbp:pagebreak/>"
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun novelMobiShowsRecindexImageInsteadOfOnlyThePageCaption() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在江心。</p><p>第 2 页</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val chapter = MobiParser.parse(file).chapters.single()
+        val plates = chapter.spans.filterIsInstance<NovelSpan.Plate>()
+        assertEquals(1, plates.size)
+        assertTrue(plates.single().bytes.contentEquals(png))
+        val prose = chapter.spans.filterIsInstance<NovelSpan.Prose>().joinToString("") { it.text }
+        assertTrue(prose.contains("潮水"))
+        assertTrue(prose.contains("江心"))
+        assertTrue(!prose.contains("第 2 页"))
+        file.delete()
+    }
+
+    @Test
+    fun coverLabelAndKindleEmbedsOpenAsPicturePages() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = buildString {
+            append("<p>封面</p>")
+            listOf("0001", "0002", "0003").forEachIndexed { index, id ->
+                append("<p>第 ${index + 1} 頁</p><img src=\"kindle:embed:$id?mime=image/jpg\"/>")
+            }
+            append("<p>THE END</p>")
+            append("/*\n * Copyright (c) 2014-2024 VOLUME.HK\n */\n")
+            append("html{color:#000;background:#FFF;}\n")
+            append("div.fs {\nheight: 1680px;\nwidth: 1264px;\n}\n")
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(listOf("png", "png", "gif"), opening.images.map { ImageSniff.extension(it) })
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun novelMobiShowsKindleEmbedImage() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在江心。</p><img src=\"kindle:embed:0001?mime=image/jpg\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val chapter = MobiParser.parse(file).chapters.single()
+        val plates = chapter.spans.filterIsInstance<NovelSpan.Plate>()
+        assertEquals(1, plates.size)
+        assertTrue(plates.single().bytes.contentEquals(png))
+        val prose = chapter.spans.filterIsInstance<NovelSpan.Prose>().joinToString("") { it.text }
+        assertTrue(prose.contains("潮水"))
+        assertTrue(prose.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun proseThatMentionsAPageNumberStaysANovel() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在第 3 页的江心。</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(!opening.pictureBook)
+        val text = opening.novel!!.chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun proseWithACoverImageStaysANovel() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在江心。</p><mbp:pagebreak/><img recindex=\"00001\" alt=\"彩页\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(!opening.pictureBook)
+        val text = opening.novel!!.chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        assertNoTagSoup(text)
+        file.delete()
+    }
+
+    @Test
+    fun jointMobiKeepsTheLongerImageRunWhenKf8TextWins() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val shortText = "<p>目录</p>".toByteArray(Charsets.UTF_8)
+        val longText = "<p>第一章潮水很深，船还在江心。后文还在这里。</p>".toByteArray(Charsets.UTF_8)
+        val shell = mobiHeader(
+            compression = 1,
+            encoding = 65001,
+            textRecords = 1,
+            textLength = shortText.size,
+            extraFlags = null,
+            firstImage = 2,
+        )
+        val body = mobiHeader(
+            compression = 1,
+            encoding = 65001,
+            textRecords = 1,
+            textLength = longText.size,
+            extraFlags = null,
+            firstImage = 9,
+        )
+        val file = File.createTempFile("manjuan", ".mobi")
+        file.writeBytes(
+            pdb(
+                listOf(
+                    shell,
+                    shortText,
+                    png,
+                    png,
+                    png,
+                    gif,
+                    "BOUNDARY".toByteArray(Charsets.US_ASCII),
+                    body,
+                    longText,
+                    png,
+                    png,
+                    gif,
+                ),
+            ),
+        )
+        val pages = MobiParser.imagePages(file)
+        assertEquals(4, pages.size)
+        assertEquals(listOf("png", "png", "png", "gif"), pages.map { ImageSniff.extension(it) })
+        val text = MobiParser.parse(file).chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
+    fun huffAfterPagebreakShellStillReportsHuff() {
+        val shell = "<html><body><mbp:pagebreak/></body></html>".toByteArray(Charsets.UTF_8)
+        val file = writeHybrid(
+            shell = shell,
+            bodyCompression = 17480,
+            bodyEncoding = 65001,
+            bodyRecords = listOf(byteArrayOf(1)),
+            bodyTextLength = 1,
+            bodyFlags = null,
+        )
+        assertChinese(file, "Huff")
+        file.delete()
+    }
+
+    @Test
     fun undecodableBytesAreNotShownAsChapters() {
         val bytes = ByteArray(64) { 0xFF.toByte() }
         val file = writeMobi(compression = 1, encoding = 65001, records = listOf(bytes), textLength = bytes.size, extraFlags = null)
@@ -151,6 +706,26 @@ class MobiParserTest {
         } catch (error: UnsupportedBookException) {
             assertTrue(error.message.orEmpty().contains(snippet))
         }
+    }
+
+    private fun assertCleanRefusal(file: File, snippet: String) {
+        try {
+            MobiParser.parse(file)
+            fail("expected UnsupportedBookException")
+        } catch (error: UnsupportedBookException) {
+            val message = error.message.orEmpty()
+            assertTrue(message, message.contains(snippet))
+            assertNoTagSoup(message)
+        }
+    }
+
+    private fun assertNoTagSoup(text: String) {
+        assertTrue(text, !text.contains("alt="))
+        assertTrue(text, !text.contains("mbp:"))
+        assertTrue(text, !text.contains("recindex"))
+        assertTrue(text, !text.contains("<"))
+        assertTrue(text, !text.contains("/>"))
+        assertTrue(text, !text.contains("\uFFFD"))
     }
 
     private fun palmDocLiterals(raw: ByteArray): ByteArray {
@@ -180,15 +755,21 @@ class MobiParserTest {
         extraFlags: Int?,
         encryption: Int = 0,
         title: String = "测试",
+        textRecordCount: Int? = null,
+        firstNonText: Int = 0,
+        extraRecords: List<ByteArray> = emptyList(),
+        firstImage: Int = 0,
     ): File {
         val titleBytes = title.toByteArray(Charsets.UTF_8)
         val headerSize = if (extraFlags == null) 144 else 0xF4
         val header = ByteArray(headerSize + titleBytes.size)
         put16(header, 0, compression)
         put32(header, 4, textLength)
-        put16(header, 8, records.size)
+        put16(header, 8, textRecordCount ?: records.size)
         put16(header, 10, 4096)
         put16(header, 12, encryption)
+        put32(header, 0x50, firstNonText)
+        put32(header, 0x6C, firstImage)
         "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 16)
         put32(header, 20, if (extraFlags == null) 128 else 0xE8)
         put32(header, 24, 2)
@@ -201,7 +782,7 @@ class MobiParserTest {
         }
         titleBytes.copyInto(header, headerSize)
 
-        val recordCount = records.size + 1
+        val recordCount = records.size + extraRecords.size + 1
         val pdb = ByteArray(78 + recordCount * 8)
         "Book".toByteArray(Charsets.US_ASCII).copyInto(pdb, 0)
         "BOOK".toByteArray(Charsets.US_ASCII).copyInto(pdb, 60)
@@ -213,6 +794,11 @@ class MobiParserTest {
         put32(pdb, 78, pdb.size)
         records.forEachIndexed { index, record ->
             put32(pdb, 78 + (index + 1) * 8, cursor)
+            blobs += record
+            cursor += record.size
+        }
+        extraRecords.forEachIndexed { index, record ->
+            put32(pdb, 78 + (records.size + 1 + index) * 8, cursor)
             blobs += record
             cursor += record.size
         }
@@ -228,6 +814,7 @@ class MobiParserTest {
         bodyRecords: List<ByteArray>,
         bodyTextLength: Int,
         bodyFlags: Int?,
+        boundary: Boolean = false,
     ): File {
         val shellHeader = mobiHeader(
             compression = 1,
@@ -246,6 +833,7 @@ class MobiParserTest {
         val blobs = ArrayList<ByteArray>()
         blobs += shellHeader
         blobs += shell
+        if (boundary) blobs += "BOUNDARY".toByteArray(Charsets.US_ASCII)
         blobs += bodyHeader
         blobs += bodyRecords
         val file = File.createTempFile("manjuan", ".mobi")
@@ -260,6 +848,7 @@ class MobiParserTest {
         textLength: Int,
         extraFlags: Int?,
         title: String = "测试",
+        firstImage: Int = 0,
     ): ByteArray {
         val titleBytes = title.toByteArray(Charsets.UTF_8)
         val headerSize = if (extraFlags == null) 144 else 0xF4
@@ -268,6 +857,7 @@ class MobiParserTest {
         put32(header, 4, textLength)
         put16(header, 8, textRecords)
         put16(header, 10, 4096)
+        put32(header, 0x6C, firstImage)
         "MOBI".toByteArray(Charsets.US_ASCII).copyInto(header, 16)
         put32(header, 20, if (extraFlags == null) 128 else 0xE8)
         put32(header, 24, 2)

@@ -1,10 +1,13 @@
 package com.numbear.manjuan.reader.text
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -28,7 +31,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -38,9 +43,11 @@ import androidx.compose.ui.unit.sp
 import com.numbear.manjuan.ManjuanApp
 import com.numbear.manjuan.cache.CacheProgress
 import com.numbear.manjuan.core.LocatorCodec
+import com.numbear.manjuan.core.NovelChapter
 import com.numbear.manjuan.core.NovelContent
+import com.numbear.manjuan.core.NovelPages
+import com.numbear.manjuan.core.NovelSpan
 import com.numbear.manjuan.core.ReaderSettings
-import com.numbear.manjuan.core.TextPaginator
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
 import com.numbear.manjuan.reader.common.ReaderLoading
@@ -157,11 +164,11 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             }
             novel != null -> {
                 val safeChapter = chapter.coerceIn(0, novel.chapters.lastIndex)
-                val text = novel.chapters[safeChapter].text
+                val current = novel.chapters[safeChapter]
                 if (settings.pageMode) {
                     PageTurn(
-                        text = text,
-                        offset = offset.coerceIn(0, text.length),
+                        chapter = current,
+                        offset = offset.coerceIn(0, current.text.length),
                         settings = settings,
                         pageCommand = pageCommand,
                         onOffset = {
@@ -180,7 +187,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                 } else {
                     ScrollChapter(
-                        text = text,
+                        chapter = current,
                         offset = offset,
                         settings = settings,
                         onOffset = {
@@ -262,7 +269,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
 
 @Composable
 private fun PageTurn(
-    text: String,
+    chapter: NovelChapter,
     offset: Int,
     settings: ReaderSettings,
     pageCommand: Int,
@@ -279,13 +286,13 @@ private fun PageTurn(
         val heightPx = with(density) { (maxHeight - margin * 2).toPx() }.coerceAtLeast(fontPx)
         val charsPerLine = (widthPx / fontPx).toInt().coerceAtLeast(6)
         val lines = (heightPx / (fontPx * settings.lineSpacing)).toInt().coerceAtLeast(3)
-        val pages = remember(text, charsPerLine, lines) { TextPaginator.pages(text, charsPerLine, lines) }
+        val pages = remember(chapter, charsPerLine, lines) { NovelPages.pages(chapter, charsPerLine, lines) }
         if (pages.isEmpty()) {
             Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
             return@BoxWithConstraints
         }
-        val initial = pages.indexOfFirst { offset < it.end }.let { if (it < 0) pages.lastIndex else it }
-        key(text, charsPerLine, lines) {
+        val initial = pages.indexOfLast { it.start <= offset }.let { if (it < 0) 0 else it }
+        key(chapter, charsPerLine, lines) {
             val pager = rememberPagerState(initialPage = initial, pageCount = { pages.size })
             LaunchedEffect(pager.currentPage) {
                 onOffset(pages[pager.currentPage].start)
@@ -302,16 +309,19 @@ private fun PageTurn(
                 else pager.animateScrollToPage(target)
             }
             HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
-                Text(
-                    pages[page].text,
-                    modifier = Modifier.fillMaxSize().padding(margin),
-                    style = TextStyle(
-                        color = colors.foreground,
-                        fontSize = settings.fontSizeSp.sp,
-                        lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
-                        fontFamily = FontFamily.Serif,
-                    ),
-                )
+                when (val item = pages[page]) {
+                    is NovelPages.Page.Words -> Text(
+                        item.text,
+                        modifier = Modifier.fillMaxSize().padding(margin),
+                        style = TextStyle(
+                            color = colors.foreground,
+                            fontSize = settings.fontSizeSp.sp,
+                            lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
+                            fontFamily = FontFamily.Serif,
+                        ),
+                    )
+                    is NovelPages.Page.Picture -> PlateImage(item.bytes, colors.foreground, Modifier.fillMaxSize().padding(margin))
+                }
             }
             Box(
                 Modifier.fillMaxSize().pointerInput(pager.currentPage, pages.size) {
@@ -337,7 +347,7 @@ private fun PageTurn(
 
 @Composable
 private fun ScrollChapter(
-    text: String,
+    chapter: NovelChapter,
     offset: Int,
     settings: ReaderSettings,
     onOffset: (Int) -> Unit,
@@ -345,31 +355,56 @@ private fun ScrollChapter(
 ) {
     val colors = settings.inkColors()
     val scroll = rememberScrollState()
-    LaunchedEffect(text) {
-        val fraction = if (text.isEmpty()) 0f else offset.toFloat() / text.length
+    val spans = chapter.spans.ifEmpty { listOf(NovelSpan.Prose(chapter.text)) }
+    LaunchedEffect(chapter) {
+        val fraction = if (chapter.text.isEmpty()) 0f else offset.toFloat() / chapter.text.length
         scroll.scrollTo((scroll.maxValue * fraction).toInt())
     }
-    Text(
-        text,
-        modifier = Modifier
+    Column(
+        Modifier
             .fillMaxSize()
             .verticalScroll(scroll)
             .pointerInput(Unit) { detectTapGestures { onToggleChrome() } }
             .padding(settings.marginDp.dp),
-        style = TextStyle(
-            color = colors.foreground,
-            fontSize = settings.fontSizeSp.sp,
-            lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
-            fontFamily = FontFamily.Serif,
-        ),
-    )
-    LaunchedEffect(scroll.value, scroll.maxValue, text) {
-        if (scroll.maxValue > 0 && text.isNotEmpty()) {
-            onOffset((scroll.value.toFloat() / scroll.maxValue * text.length).toInt())
+    ) {
+        spans.forEach { span ->
+            when (span) {
+                is NovelSpan.Prose -> Text(
+                    span.text,
+                    style = TextStyle(
+                        color = colors.foreground,
+                        fontSize = settings.fontSizeSp.sp,
+                        lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
+                        fontFamily = FontFamily.Serif,
+                    ),
+                )
+                is NovelSpan.Plate -> PlateImage(span.bytes, colors.foreground, Modifier.fillMaxWidth().padding(vertical = 12.dp))
+            }
+        }
+    }
+    LaunchedEffect(scroll.value, scroll.maxValue, chapter) {
+        if (scroll.maxValue > 0 && chapter.text.isNotEmpty()) {
+            onOffset((scroll.value.toFloat() / scroll.maxValue * chapter.text.length).toInt())
         }
     }
     LinearProgressIndicator(
         progress = { if (scroll.maxValue == 0) 0f else scroll.value.toFloat() / scroll.maxValue },
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+@Composable
+private fun PlateImage(bytes: ByteArray, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
+    val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+    if (bitmap == null) {
+        Text("彩页无法显示", color = color, modifier = modifier)
+    } else {
+        val ratio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+        Image(
+            bitmap.asImageBitmap(),
+            contentDescription = "彩页",
+            modifier = modifier.aspectRatio(ratio),
+            contentScale = ContentScale.Fit,
+        )
+    }
 }

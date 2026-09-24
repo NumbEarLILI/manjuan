@@ -13,7 +13,13 @@ object MobiParser {
     private val charsetMeta = Regex("""charset\s*=\s*["']?\s*([A-Za-z0-9._+-]+)""", RegexOption.IGNORE_CASE)
     private const val MIN_READABLE = 2
 
-    fun parse(file: File): NovelContent {
+    data class Opening(
+        val novel: NovelContent?,
+        val images: List<ByteArray>,
+        val pictureBook: Boolean,
+    )
+
+    fun opening(file: File): Opening {
         val bytes = file.readBytes()
         if (bytes.size < 80 || !FormatDetector.isMobi(bytes)) {
             throw UnsupportedBookException("这不是有效的 MOBI（缺少 BOOKMOBI 标识）")
@@ -22,6 +28,8 @@ object MobiParser {
         if (offsets.isEmpty()) throw UnsupportedBookException("MOBI 记录表是空的")
         val starts = headerStarts(bytes, offsets)
         var best: Extracted? = null
+        var markupHtml = ""
+        var markupHeader = 0
         var primaryStop: UnsupportedBookException? = null
         var sawHuff = false
         var sawEncrypted = false
@@ -40,22 +48,53 @@ object MobiParser {
                         message.contains("解码") -> sawUndecodable = true
                     }
                 }
-                Attempt.None -> Unit
+                is Attempt.None -> if (markupHtml.isEmpty() && attempt.html.isNotEmpty()) {
+                    markupHtml = attempt.html
+                    markupHeader = attempt.headerIndex
+                }
             }
-            if (index == 0 && best != null && best!!.score >= MIN_READABLE) return best!!.toNovel()
         }
-        best?.takeIf { it.score >= MIN_READABLE }?.let { return it.toNovel() }
+        val headerIndex = best?.headerIndex ?: markupHeader
+        val images = collectImages(bytes, offsets, headerIndex)
+        val letters = best?.let { proseLetters(it.plain) } ?: 0
+        if (letters >= MIN_READABLE) return Opening(best!!.toNovel(images), images, false)
         if (sawHuff) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
         if (sawEncrypted) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
+        // Comic only when almost no prose remains and there is a real page run.
+        if (images.size >= 3) return Opening(null, images, true)
         if (sawUndecodable) throw UnsupportedBookException("无法解码这本 MOBI 的正文")
         primaryStop?.let { throw it }
-        throw UnsupportedBookException("没有从 MOBI 中提取到正文")
+        return Opening(null, images, false)
+    }
+
+    fun parse(file: File): NovelContent {
+        val opening = opening(file)
+        if (opening.pictureBook) {
+            throw UnsupportedBookException(
+                if (opening.images.isEmpty()) {
+                    "这本 MOBI 是图片书，但没有可显示的图片"
+                } else {
+                    "这本 MOBI 是图片页，不能当小说打开"
+                },
+            )
+        }
+        return opening.novel ?: throw UnsupportedBookException("没有从 MOBI 中提取到正文")
+    }
+
+    fun imagePages(file: File): List<ByteArray> {
+        val opening = opening(file)
+        if (opening.images.isEmpty()) {
+            throw UnsupportedBookException("这本 MOBI 是图片书，但没有可显示的图片")
+        }
+        return opening.images
     }
 
     /**
-     * Kindlegen joint files put an empty MOBI7 shell in front of the KF8 header.
-     * Huff/CDIC text, DRM, and fragment text that exists only in an INDX (not in the
-     * raw text records) still cannot be turned into chapters.
+     * Kindlegen joint `.mobi` files put a MOBI7 header, its text records, a
+     * `BOUNDARY` record, then a KF8 header. A short MOBI7 stub must not hide a
+     * longer KF8 PalmDoc section. Huff/CDIC text, DRM, and fragment text that
+     * exists only in an INDX (not in the raw text records) still cannot be
+     * turned into chapters.
      */
     private fun headerStarts(bytes: ByteArray, offsets: IntArray): List<Int> {
         val starts = ArrayList<Int>(2)
@@ -101,6 +140,54 @@ object MobiParser {
             65001
         }
         val flags = extraFlags(header)
+        val declared = textRecordCount
+        val wider = widerTextRecords(header, declared, headerIndex, offsets.size)
+        val primaryCount = if (declared > 0) declared else wider
+        val primary = extractTextRecords(
+            bytes, offsets, headerIndex, primaryCount, compression, flags, textLength, encoding, fallbackTitle,
+        )
+        if (primary is Attempt.Text) return primary
+        if (declared > 0 && wider > declared) {
+            val retry = extractTextRecords(
+                bytes, offsets, headerIndex, wider, compression, flags, textLength, encoding, fallbackTitle,
+            )
+            if (retry is Attempt.Text) return retry
+        }
+        return primary
+    }
+
+    /**
+     * The 16-bit text record count is sometimes 0, or it stops on an empty
+     * leading record, while `first_nontext` (record offset 0x50, relative to
+     * this header) still spans the PalmDoc records. Kindlegen's KF8 half stores
+     * that index relative to its own header, so the implied count is
+     * `first_nontext - 1`.
+     */
+    private fun widerTextRecords(header: ByteArray, declared: Int, headerIndex: Int, recordCount: Int): Int {
+        if (header.size < 0x54) return declared
+        if (header.copyOfRange(16, 20).toString(Charsets.US_ASCII) != "MOBI") return declared
+        val firstNonText = u32(header, 0x50)
+        if (firstNonText <= 1 || firstNonText == -1) return declared
+        val implied = firstNonText - 1
+        val available = recordCount - headerIndex - 1
+        if (implied <= declared || implied > available) return declared
+        return implied
+    }
+
+    private fun extractTextRecords(
+        bytes: ByteArray,
+        offsets: IntArray,
+        headerIndex: Int,
+        textRecordCount: Int,
+        compression: Int,
+        flags: Int,
+        textLength: Int,
+        encoding: Int,
+        fallbackTitle: String,
+    ): Attempt {
+        val header = safeRecord(bytes, offsets, headerIndex) ?: return Attempt.Stop(
+            UnsupportedBookException("MOBI 文件不完整或已损坏"),
+        )
         val stripped = decompressText(bytes, offsets, headerIndex, textRecordCount, compression, flags)
             ?: return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
         val raw = if (flags == 0) {
@@ -110,6 +197,7 @@ object MobiParser {
                 ?: return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
         }
         var bestPlain = ""
+        var bestHtml = ""
         var bestScore = 0
         var sawDecodeFailure = false
         var longest = 0
@@ -122,10 +210,11 @@ object MobiParser {
                 when (val decoded = plainText(candidate, encoding)) {
                     null -> sawDecodeFailure = true
                     else -> {
-                        val score = readableScore(decoded)
-                        if (score > bestScore) {
+                        val score = readableScore(decoded.plain)
+                        if (score > bestScore || (score == bestScore && bestHtml.isEmpty())) {
                             bestScore = score
-                            bestPlain = decoded
+                            bestPlain = decoded.plain
+                            bestHtml = decoded.html
                         }
                     }
                 }
@@ -134,13 +223,73 @@ object MobiParser {
         }
         if (bestScore >= MIN_READABLE) {
             val title = readFullName(header, encoding) ?: fallbackTitle
-            return Attempt.Text(Extracted(bestPlain, title, bestScore))
+            return Attempt.Text(Extracted(bestPlain, title, bestScore, bestHtml, headerIndex))
         }
         if (textLength > longest && textLength - longest > 4096) {
             return Attempt.Stop(UnsupportedBookException("MOBI 文件不完整或已损坏"))
         }
-        if (sawDecodeFailure) return Attempt.Stop(UnsupportedBookException("无法解码这本 MOBI 的正文"))
-        return Attempt.None
+        if (sawDecodeFailure && bestHtml.isEmpty()) {
+            return Attempt.Stop(UnsupportedBookException("无法解码这本 MOBI 的正文"))
+        }
+        return Attempt.None(bestHtml, headerIndex)
+    }
+
+    private fun collectImages(bytes: ByteArray, offsets: IntArray, headerIndex: Int): List<ByteArray> {
+        var ranged = emptyList<ByteArray>()
+        val preferred = safeRecord(bytes, offsets, headerIndex)
+        if (preferred != null) {
+            ranged = imagesFromHeader(bytes, offsets, headerIndex, preferred)
+        }
+        // A joint file's longer text header can point at a shorter image run.
+        // Keep the longest run instead of only the header that won the text score.
+        for (start in headerStarts(bytes, offsets)) {
+            if (start == headerIndex) continue
+            val header = safeRecord(bytes, offsets, start) ?: continue
+            val candidate = imagesFromHeader(bytes, offsets, start, header)
+            if (candidate.size > ranged.size) ranged = candidate
+        }
+        if (ranged.isNotEmpty()) return ranged
+        val found = ArrayList<ByteArray>()
+        for (index in 0 until offsets.size) {
+            val record = safeRecord(bytes, offsets, index) ?: continue
+            if (isEmbeddedHeader(record) || record.size == 8 && record.toString(Charsets.US_ASCII) == "BOUNDARY") continue
+            val image = ImageSniff.extract(record) ?: continue
+            if (found.none { it.contentEquals(image) }) found += image
+        }
+        return found
+    }
+
+    private fun imagesFromHeader(
+        bytes: ByteArray,
+        offsets: IntArray,
+        headerIndex: Int,
+        header: ByteArray,
+    ): List<ByteArray> {
+        if (header.size < 0x70) return emptyList()
+        val first = u32(header, 0x6C)
+        if (first <= 0 || first == -1) return emptyList()
+        val start = listOf(first, headerIndex + first).firstOrNull { index ->
+            val record = safeRecord(bytes, offsets, index)
+            record != null && ImageSniff.extract(record) != null
+        } ?: return emptyList()
+        val images = ArrayList<ByteArray>()
+        for (index in start until offsets.size) {
+            val record = safeRecord(bytes, offsets, index) ?: break
+            if (record.size == 8 && record.toString(Charsets.US_ASCII) == "BOUNDARY") break
+            if (isStructuralRecord(record)) {
+                if (images.isNotEmpty()) break
+                continue
+            }
+            val image = ImageSniff.extract(record) ?: if (images.isNotEmpty()) break else continue
+            images += image
+        }
+        return images
+    }
+
+    private fun isStructuralRecord(record: ByteArray): Boolean {
+        if (record.size < 4) return false
+        val token = record.copyOfRange(0, 4).toString(Charsets.US_ASCII)
+        return token in setOf("INDX", "FLIS", "FCIS", "SRCS", "CMET", "HUFF", "CDIC", "FDST", "RESC", "MOBI")
     }
 
     private fun decompressText(
@@ -162,34 +311,99 @@ object MobiParser {
         return joined.toByteArray()
     }
 
-    private fun plainText(bytes: ByteArray, encoding: Int): String? {
-        if (bytes.isEmpty()) return ""
+    private data class DecodedPlain(val plain: String, val html: String)
+
+    private fun plainText(bytes: ByteArray, encoding: Int): DecodedPlain? {
+        if (bytes.isEmpty()) return DecodedPlain("", "")
         val decoded = try {
             decodeBody(bytes, encoding)
         } catch (_: UnsupportedBookException) {
             return null
         }
-        return HtmlText.toPlain(stripControls(decoded))
+        val html = stripControls(decoded)
+        return DecodedPlain(HtmlText.toPlain(html), html)
     }
 
-    private fun readableScore(plain: String): Int {
+    private fun readableScore(plain: String): Int = proseLetters(plain)
+
+    /** Page captions such as 第 138 頁 or 138页 are not prose. A lone 封面 is not either. */
+    private val pageCaption = Regex("""(?i)(?:第\s*)?[0-9０-９]{1,6}\s*[頁页]|page\s*[0-9]{1,6}|[-—–]\s*[0-9０-９]{1,6}\s*[-—–]""")
+    private val coverLabel = Regex("""(?i)^(?:封面|book\s*cover|cover)$""")
+    private val endLabel = Regex("""(?i)^(?:the\s*end|完|終|结束|結束)$""")
+    private val kindleEmbed = Regex("""(?i)kindle:embed:([0-9A-V]+)""")
+    private const val KINDLE_BASE32 = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
+    private fun proseLetters(plain: String): Int {
         if (plain.isBlank()) return 0
-        return plain.count { it.isLetter() }
+        return plain.lineSequence().sumOf { line ->
+            val stripped = pageCaption.replace(line, "").trim()
+            if (stripped.isEmpty() || coverLabel.matches(stripped) || endLabel.matches(stripped)) 0 else stripped.count { it.isLetter() }
+        }
     }
 
-    private data class Extracted(val plain: String, val title: String, val score: Int) {
-        fun toNovel(): NovelContent {
+    private fun isCaptionOnly(plain: String): Boolean =
+        pageCaption.replace(plain, "").none { it.isLetter() }
+
+    /** KF8 `kindle:embed:001J` is a 1-based image index in base 32. */
+    private fun kindleEmbedIndex(href: String): Int {
+        val token = kindleEmbed.find(href)?.groupValues?.get(1) ?: return 0
+        var value = 0
+        for (ch in token) {
+            val digit = KINDLE_BASE32.indexOf(ch.uppercaseChar())
+            if (digit < 0) return 0
+            value = value * 32 + digit
+            if (value > 100_000) return 0
+        }
+        return value
+    }
+
+    private data class Extracted(
+        val plain: String,
+        val title: String,
+        val score: Int,
+        val html: String,
+        val headerIndex: Int,
+    ) {
+        fun toNovel(images: List<ByteArray>): NovelContent {
+            val spanned = imageSpans(html, images)
+            if (spanned.any { it is NovelSpan.Plate }) {
+                val text = spanned.filterIsInstance<NovelSpan.Prose>().joinToString("\n") { it.text }
+                val heading = TxtChapters.split(text).firstOrNull()?.title ?: "正文"
+                return NovelContent(title, "", listOf(NovelChapter(heading, text, spanned)))
+            }
             val chapters = TxtChapters.split(plain).map { chapter ->
                 NovelChapter(chapter.title, plain.substring(chapter.start, chapter.end).trim())
             }
             return NovelContent(title, "", chapters.ifEmpty { listOf(NovelChapter("正文", plain)) })
+        }
+
+        private fun imageSpans(html: String, images: List<ByteArray>): List<NovelSpan> {
+            if (images.isEmpty()) return emptyList()
+            val spans = ArrayList<NovelSpan>()
+            for (block in HtmlText.blocks(html)) {
+                when (block) {
+                    is HtmlText.Block.Text -> {
+                        val kept = HtmlText.toPlain(block.html)
+                            .lineSequence()
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() && !isCaptionOnly(it) }
+                            .joinToString("\n")
+                        if (kept.isNotEmpty()) spans += NovelSpan.Prose(kept)
+                    }
+                    is HtmlText.Block.Image -> {
+                        val index = if (block.recindex > 0) block.recindex else kindleEmbedIndex(block.href)
+                        if (index in 1..images.size) spans += NovelSpan.Plate(images[index - 1])
+                    }
+                }
+            }
+            return spans
         }
     }
 
     private sealed interface Attempt {
         data class Text(val extracted: Extracted) : Attempt
         data class Stop(val error: UnsupportedBookException) : Attempt
-        data object None : Attempt
+        data class None(val html: String, val headerIndex: Int) : Attempt
     }
 
     /**
