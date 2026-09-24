@@ -14,6 +14,8 @@ data class PagedContent(
     val pages: List<PageRef>,
     val pdfFile: File?,
     val pdfPageCount: Int,
+    /** Remote image count when more pages exist than [pages]. Zero means the list is complete. */
+    val remotePageCount: Int = 0,
 )
 
 data class ImportReport(val added: Int, val errors: List<String>)

@@ -129,6 +129,17 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
             book != null && count == 0 -> Text("没有可显示的页面", Modifier.align(Alignment.Center), color = scheme.onBackground)
             book != null -> {
                 val safePage = page.coerceIn(0, count - 1)
+                val pageTotal = if (book.remotePageCount > count) book.remotePageCount else count
+                LaunchedEffect(safePage, count, book.remotePageCount) {
+                    if (book.remotePageCount > count && safePage >= count - 2) {
+                        try {
+                            content = app.library.extendPaged(bookId, safePage)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
                 if (settings.comicDirection == "VERTICAL") {
                     val listState = rememberLazyListState(initialFirstVisibleItemIndex = safePage)
                     LaunchedEffect(listState) {
@@ -202,7 +213,7 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                 }
                 if (chrome) {
                     ReaderTopBar(
-                        title = "${book.title}  ${safePage + 1}/$count",
+                        title = "${book.title}  ${safePage + 1}/$pageTotal",
                         bookmarked = bookmarks.any { LocatorCodec.pageIndex(it.locator) == safePage },
                         onBack = onBack,
                         onBookmark = {
@@ -227,9 +238,19 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                             .padding(12.dp),
                     ) {
                         PercentSlider(
-                            percent = if (count <= 1) 0f else safePage.toFloat() / (count - 1),
+                            percent = if (pageTotal <= 1) 0f else safePage.toFloat() / (pageTotal - 1),
                             labelColor = scheme.onSurface,
-                        ) { value -> persist((value * (count - 1)).toInt().coerceIn(0, count - 1)) }
+                        ) { value ->
+                            val target = (value * (pageTotal - 1)).toInt().coerceIn(0, pageTotal - 1)
+                            if (target >= count && book.remotePageCount > count) {
+                                scope.launch {
+                                    runCatching { content = app.library.extendPaged(bookId, target) }
+                                    persist(target.coerceAtMost((content?.pages?.size ?: count) - 1))
+                                }
+                            } else {
+                                persist(target.coerceAtMost(count - 1))
+                            }
+                        }
                         TextButton(onClick = { showSettings = true }) { Text("阅读", color = scheme.onSurface) }
                     }
                 }
