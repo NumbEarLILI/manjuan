@@ -202,13 +202,20 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                 } else {
                     ScrollChapter(
-                        chapter = current,
-                        offset = offset,
+                        chapters = novel.chapters,
+                        chapterIndex = safeChapter,
+                        offset = offset.coerceIn(0, current.text.length),
                         anchor = anchor,
                         settings = settings,
-                        onOffset = {
-                            offset = it
-                            persist()
+                        onPlace = { nextChapter, nextOffset ->
+                            val clamped = nextChapter.coerceIn(0, novel.chapters.lastIndex)
+                            val textLength = novel.chapters[clamped].text.length
+                            val clampedOffset = nextOffset.coerceIn(0, textLength)
+                            if (clamped != chapter || clampedOffset != offset) {
+                                chapter = clamped
+                                offset = clampedOffset
+                                persist()
+                            }
                         },
                         onToggleChrome = { chrome = !chrome },
                     )
@@ -365,11 +372,12 @@ private fun PageTurn(
 
 @Composable
 private fun ScrollChapter(
-    chapter: NovelChapter,
+    chapters: List<NovelChapter>,
+    chapterIndex: Int,
     offset: Int,
     anchor: Int,
     settings: ReaderSettings,
-    onOffset: (Int) -> Unit,
+    onPlace: (chapter: Int, offset: Int) -> Unit,
     onToggleChrome: () -> Unit,
 ) {
     val colors = settings.inkColors()
@@ -387,24 +395,25 @@ private fun ScrollChapter(
         val maxChars = remember(charsPerLine, lineHeightPx) {
             NovelScroll.maxChars(charsPerLine, lineHeightPx)
         }
-        val blocks = remember(chapter, maxChars) { NovelScroll.blocks(chapter, maxChars) }
+        val entries = remember(chapters, maxChars) { NovelScroll.document(chapters, maxChars) }
         val listState = rememberLazyListState()
         var settling by remember { mutableStateOf(true) }
-        LaunchedEffect(anchor, blocks) {
+        LaunchedEffect(anchor, entries) {
             settling = true
             try {
-                if (blocks.isEmpty()) return@LaunchedEffect
-                val index = NovelScroll.indexAt(blocks, offset).coerceIn(0, blocks.lastIndex)
+                if (entries.isEmpty()) return@LaunchedEffect
+                val index = NovelScroll.indexAt(entries, chapterIndex, offset).coerceIn(0, entries.lastIndex)
                 listState.scrollToItem(index)
-                val block = blocks[index]
-                if (block is NovelScroll.Block.Words && block.text.isNotEmpty()) {
+                val body = entries[index] as? NovelScroll.Entry.Body
+                val words = body?.block as? NovelScroll.Block.Words
+                if (words != null && words.text.isNotEmpty() && offset > words.start) {
                     val size = withTimeoutOrNull(500) {
                         snapshotFlow {
                             listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
                         }.first { it > 0 }
                     } ?: 0
                     if (size > 0) {
-                        val fraction = (offset - block.start).coerceIn(0, block.text.length).toFloat() / block.text.length
+                        val fraction = (offset - words.start).coerceIn(0, words.text.length).toFloat() / words.text.length
                         listState.scrollToItem(index, (fraction * size).toInt().coerceAtLeast(0))
                     }
                 }
@@ -412,24 +421,19 @@ private fun ScrollChapter(
                 settling = false
             }
         }
-        LaunchedEffect(listState, blocks) {
+        LaunchedEffect(listState, entries) {
             snapshotFlow {
                 val index = listState.firstVisibleItemIndex
                 val pixel = listState.firstVisibleItemScrollOffset
                 val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
                 Triple(index, pixel, size)
             }.collect { (index, pixel, size) ->
-                if (settling || blocks.isEmpty() || chapter.text.isEmpty()) return@collect
-                val block = blocks.getOrNull(index) ?: return@collect
-                val within = if (block is NovelScroll.Block.Words && size > 0 && block.text.isNotEmpty()) {
-                    (block.text.length * (pixel.toFloat() / size)).toInt().coerceIn(0, block.text.length)
-                } else {
-                    0
-                }
-                onOffset((block.start + within).coerceIn(0, chapter.text.length))
+                if (settling || entries.isEmpty()) return@collect
+                val entry = entries.getOrNull(index) ?: return@collect
+                onPlace(entry.chapter, entryOffset(entry, pixel, size))
             }
         }
-        if (blocks.isEmpty()) {
+        if (entries.isEmpty()) {
             Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
         } else {
             val style = TextStyle(
@@ -444,19 +448,29 @@ private fun ScrollChapter(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(margin),
             ) {
-                items(count = blocks.size, key = { it }) { index ->
-                    when (val block = blocks[index]) {
-                        is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = Modifier.fillMaxWidth())
-                        is NovelScroll.Block.Picture -> PlateImage(
-                            block.bytes,
-                            colors.foreground,
-                            Modifier.fillMaxWidth().heightIn(max = plateCap).padding(vertical = 12.dp),
+                items(count = entries.size, key = { it }) { index ->
+                    val entry = entries[index]
+                    val chapterBreak = index > 0 && entries[index - 1].chapter != entry.chapter
+                    val gap = if (chapterBreak) Modifier.padding(top = 28.dp) else Modifier
+                    when (entry) {
+                        is NovelScroll.Entry.Heading -> Text(
+                            entry.title,
+                            style = style,
+                            modifier = gap.fillMaxWidth().padding(bottom = 12.dp),
                         )
+                        is NovelScroll.Entry.Body -> when (val block = entry.block) {
+                            is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = gap.fillMaxWidth())
+                            is NovelScroll.Block.Picture -> PlateImage(
+                                block.bytes,
+                                colors.foreground,
+                                gap.fillMaxWidth().heightIn(max = plateCap).padding(vertical = 12.dp),
+                            )
+                        }
                     }
                 }
             }
         }
-        val shown = scrollFraction(blocks, listState, chapter.text.length)
+        val shown = scrollFraction(chapters, entries, listState)
         LinearProgressIndicator(
             progress = { shown },
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
@@ -486,17 +500,23 @@ private suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
     }
 }
 
-private fun scrollFraction(blocks: List<NovelScroll.Block>, listState: LazyListState, textLength: Int): Float {
-    if (textLength <= 0 || blocks.isEmpty()) return 0f
-    val index = listState.firstVisibleItemIndex.coerceIn(0, blocks.lastIndex)
-    val block = blocks[index]
+private fun entryOffset(entry: NovelScroll.Entry, pixel: Int, size: Int): Int {
+    val body = entry as? NovelScroll.Entry.Body ?: return 0
+    val words = body.block as? NovelScroll.Block.Words ?: return body.block.start
+    if (size <= 0 || words.text.isEmpty()) return words.start
+    val within = (words.text.length * (pixel.toFloat() / size)).toInt().coerceIn(0, words.text.length)
+    return words.start + within
+}
+
+private fun scrollFraction(chapters: List<NovelChapter>, entries: List<NovelScroll.Entry>, listState: LazyListState): Float {
+    val total = chapters.sumOf { it.text.length }
+    if (total <= 0 || entries.isEmpty()) return 0f
+    val index = listState.firstVisibleItemIndex.coerceIn(0, entries.lastIndex)
+    val entry = entries[index]
     val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
-    val within = if (block is NovelScroll.Block.Words && size > 0 && block.text.isNotEmpty()) {
-        (block.text.length * (listState.firstVisibleItemScrollOffset.toFloat() / size)).toInt()
-    } else {
-        0
-    }
-    return ((block.start + within).toFloat() / textLength).coerceIn(0f, 1f)
+    val local = entryOffset(entry, listState.firstVisibleItemScrollOffset, size)
+    val before = chapters.take(entry.chapter).sumOf { it.text.length }
+    return ((before + local).toFloat() / total).coerceIn(0f, 1f)
 }
 
 @Composable

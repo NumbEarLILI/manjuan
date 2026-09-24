@@ -68,6 +68,54 @@ object NovelScroll {
         return index
     }
 
+    /**
+     * One scrollable sequence for the whole book. A chapter ends, and the next chapter follows,
+     * so a drag that reaches the bottom continues into the next chapter.
+     */
+    sealed class Entry {
+        abstract val chapter: Int
+
+        data class Heading(override val chapter: Int, val title: String) : Entry()
+
+        data class Body(override val chapter: Int, val block: Block) : Entry()
+    }
+
+    fun document(chapters: List<NovelChapter>, maxChars: Int): List<Entry> {
+        val entries = ArrayList<Entry>()
+        chapters.forEachIndexed { index, chapter ->
+            if (needsHeading(chapter)) entries += Entry.Heading(index, chapter.title.trim())
+            for (block in blocks(chapter, maxChars)) {
+                entries += Entry.Body(index, block)
+            }
+        }
+        return entries
+    }
+
+    fun indexAt(entries: List<Entry>, chapter: Int, offset: Int): Int {
+        if (entries.isEmpty()) return 0
+        val targetChapter = chapter.coerceAtLeast(0)
+        val targetOffset = offset.coerceAtLeast(0)
+        val owned = entries.indices.filter { entries[it].chapter == targetChapter }
+        if (owned.isEmpty()) {
+            val earlier = entries.indexOfLast { it.chapter < targetChapter }
+            return if (earlier >= 0) earlier else 0
+        }
+        if (targetOffset == 0) return owned.first()
+        var index = owned.first()
+        for (i in owned) {
+            val body = entries[i] as? Entry.Body ?: continue
+            if (body.block.start <= targetOffset) index = i
+        }
+        return index
+    }
+
+    private fun needsHeading(chapter: NovelChapter): Boolean {
+        val title = chapter.title.trim()
+        if (title.isEmpty()) return false
+        val first = chapter.text.trimStart().lineSequence().firstOrNull()?.trim().orEmpty()
+        return first != title && !first.startsWith(title)
+    }
+
     private fun chunk(text: String, base: Int, limit: Int): List<Block.Words> {
         if (text.isEmpty()) return emptyList()
         val out = ArrayList<Block.Words>()

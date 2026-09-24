@@ -65,6 +65,52 @@ class NovelScrollTest {
     }
 
     @Test
+    fun documentContinuesIntoTheNextChapter() {
+        val first = "第一章\n" + "甲".repeat(10)
+        val second = "第二章\n" + "乙".repeat(10)
+        val chapters = listOf(
+            NovelChapter("第一章", first),
+            NovelChapter("第二章", second),
+        )
+        val entries = NovelScroll.document(chapters, maxChars = 4)
+        val chapterBodies = entries.filterIsInstance<NovelScroll.Entry.Body>().groupBy { it.chapter }
+
+        assertEquals(first, chapterBodies.getValue(0).joinToString("") { (it.block as NovelScroll.Block.Words).text })
+        assertEquals(second, chapterBodies.getValue(1).joinToString("") { (it.block as NovelScroll.Block.Words).text })
+        assertTrue(entries.none { it is NovelScroll.Entry.Heading })
+
+        val start = NovelScroll.indexAt(entries, chapter = 1, offset = 0)
+        assertEquals(1, entries[start].chapter)
+        assertEquals(0, (entries[start] as NovelScroll.Entry.Body).block.start)
+
+        val later = NovelScroll.indexAt(entries, chapter = 1, offset = 8)
+        val laterBody = entries[later] as NovelScroll.Entry.Body
+        val laterWords = laterBody.block as NovelScroll.Block.Words
+        assertEquals(1, laterBody.chapter)
+        assertTrue(laterWords.start <= 8)
+        assertTrue(8 < laterWords.start + laterWords.text.length)
+
+        val endOfFirst = NovelScroll.indexAt(entries, chapter = 0, offset = first.length - 1)
+        assertEquals(0, entries[endOfFirst].chapter)
+    }
+
+    @Test
+    fun headingIsInsertedWhenTheBodyDoesNotAlreadyStartWithTheTitle() {
+        val chapters = listOf(
+            NovelChapter("序", "很久以前"),
+            NovelChapter("正文", "甲乙丙丁"),
+        )
+        val entries = NovelScroll.document(chapters, maxChars = 100)
+
+        assertTrue(entries.first() is NovelScroll.Entry.Heading)
+        assertEquals("序", (entries.first() as NovelScroll.Entry.Heading).title)
+        val second = entries.indexOfFirst { it.chapter == 1 }
+        assertTrue(entries[second] is NovelScroll.Entry.Heading)
+        assertEquals("正文", (entries[second] as NovelScroll.Entry.Heading).title)
+        assertEquals(second, NovelScroll.indexAt(entries, chapter = 1, offset = 0))
+    }
+
+    @Test
     fun maxCharsKeepsBlockUnderPixelBudget() {
         assertEquals(760, NovelScroll.maxChars(charsPerLine = 20, lineHeightPx = 80f, maxBlockPx = 3072))
         val chars = NovelScroll.maxChars(charsPerLine = 8, lineHeightPx = 280f, maxBlockPx = 3072)
