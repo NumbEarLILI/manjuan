@@ -4,8 +4,10 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -378,10 +380,29 @@ private fun ZoomImage(bitmap: Bitmap, fit: String, vertical: Boolean) {
     var panY by remember(bitmap) { mutableFloatStateOf(0f) }
     val transform = Modifier
         .pointerInput(bitmap) {
-            detectTransformGestures { _, pan, zoom, _ ->
-                scale = (scale * zoom).coerceIn(1f, 6f)
-                panX += pan.x
-                panY += pan.y
+            // One finger turns the page. Pinch, or a drag after zooming, moves the picture.
+            awaitEachGesture {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val zoomChange = event.calculateZoom()
+                    val panChange = event.calculatePan()
+                    val pointers = event.changes.count { it.pressed }
+                    val zooming = pointers > 1 || scale > 1.01f
+                    if (zooming) {
+                        val next = (scale * zoomChange).coerceIn(1f, 6f)
+                        if (next <= 1f) {
+                            scale = 1f
+                            panX = 0f
+                            panY = 0f
+                        } else {
+                            scale = next
+                            panX += panChange.x
+                            panY += panChange.y
+                        }
+                        event.changes.forEach { it.consume() }
+                    }
+                    if (event.changes.none { it.pressed }) break
+                }
             }
         }
         .graphicsLayer {
