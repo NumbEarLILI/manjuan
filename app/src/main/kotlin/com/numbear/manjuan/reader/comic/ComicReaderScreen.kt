@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -185,7 +186,21 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(count) { index ->
-                            PageBitmap(app, bookId, book, index) { bitmap ->
+                            // A zero-height placeholder makes the list compose every page and
+                            // download them. Keep an unloaded page one screen tall.
+                            var ready by remember(book, index) { mutableStateOf(false) }
+                            PageBitmap(
+                                app,
+                                bookId,
+                                book,
+                                index,
+                                modifier = if (ready) {
+                                    Modifier.fillParentMaxWidth()
+                                } else {
+                                    Modifier.fillParentMaxWidth().fillParentMaxHeight()
+                                },
+                            ) { bitmap ->
+                                SideEffect { ready = true }
                                 ZoomImage(bitmap, settings.fitMode, vertical = true)
                             }
                         }
