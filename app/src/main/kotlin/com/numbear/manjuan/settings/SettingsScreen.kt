@@ -19,7 +19,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.ManjuanApp
 import com.numbear.manjuan.core.AppTheme
+import com.numbear.manjuan.ui.SettingSlider
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.source.webdav.WebDavAccountSection
 import kotlinx.coroutines.launch
@@ -90,11 +90,11 @@ fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
                 FilterChip(!settings.pageMode, { update(settings.copy(pageMode = false)) }, label = { Text("滚动") })
             }
             Text("字号 ${settings.fontSizeSp.toInt()}")
-            Slider(settings.fontSizeSp, { update(settings.copy(fontSizeSp = it)) }, valueRange = 14f..32f)
+            SettingSlider(settings.fontSizeSp, { update(settings.copy(fontSizeSp = it)) }, valueRange = 14f..32f)
             Text("行距 ${"%.1f".format(settings.lineSpacing)}")
-            Slider(settings.lineSpacing, { update(settings.copy(lineSpacing = it)) }, valueRange = 1.1f..2.2f)
+            SettingSlider(settings.lineSpacing, { update(settings.copy(lineSpacing = it)) }, valueRange = 1.1f..2.2f)
             Text("边距 ${settings.marginDp.toInt()}")
-            Slider(settings.marginDp, { update(settings.copy(marginDp = it)) }, valueRange = 8f..48f)
+            SettingSlider(settings.marginDp, { update(settings.copy(marginDp = it)) }, valueRange = 8f..48f)
 
             Text("漫画 / PDF", style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
