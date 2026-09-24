@@ -171,11 +171,19 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
             book != null -> {
                 val safePage = page.coerceIn(0, count - 1)
                 val pageTotal = if (book.remotePageCount > count) book.remotePageCount else count
-                LaunchedEffect(safePage, count, book.remotePageCount) {
-                    if (book.remotePageCount > count && safePage >= count - 2) {
+                // Keyed only by the book so a page turn does not cancel the fetch already running.
+                LaunchedEffect(bookId) {
+                    snapshotFlow {
+                        val latest = content
+                        val loaded = latest?.pages?.size ?: 0
+                        val remote = latest?.remotePageCount ?: 0
+                        remote > loaded && page >= loaded - 2
+                    }.collect { need ->
+                        if (!need) return@collect
+                        val index = page
                         loadingMore = true
                         try {
-                            content = app.library.extendPaged(bookId, safePage)
+                            content = app.library.extendPaged(bookId, index)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
