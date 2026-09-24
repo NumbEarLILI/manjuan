@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -243,7 +244,14 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                             content = colors.foreground,
                         )
                     }
-                    Column(Modifier.align(Alignment.BottomCenter).background(colors.background.copy(alpha = 0.94f)).padding(12.dp)) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(colors.background.copy(alpha = 0.94f))
+                            .navigationBarsPadding()
+                            .padding(12.dp),
+                    ) {
                         PercentSlider(percent(), colors.foreground) { seek(it) }
                         TextButton(onClick = { showBookmarks = true }) { Text("书签") }
                         TextButton(onClick = { showSettings = true }) { Text("版式") }

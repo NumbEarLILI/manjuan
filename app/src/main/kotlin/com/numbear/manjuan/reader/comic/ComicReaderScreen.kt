@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -218,7 +219,12 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                         content = scheme.onSurface,
                     )
                     Column(
-                        Modifier.align(Alignment.BottomCenter).background(scheme.surface.copy(alpha = 0.94f)).padding(12.dp),
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(scheme.surface.copy(alpha = 0.94f))
+                            .navigationBarsPadding()
+                            .padding(12.dp),
                     ) {
                         PercentSlider(
                             percent = if (count <= 1) 0f else safePage.toFloat() / (count - 1),
