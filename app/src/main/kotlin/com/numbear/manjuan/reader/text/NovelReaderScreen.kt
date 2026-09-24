@@ -3,6 +3,8 @@ package com.numbear.manjuan.reader.text
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -10,11 +12,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -29,9 +36,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -46,7 +56,7 @@ import com.numbear.manjuan.core.LocatorCodec
 import com.numbear.manjuan.core.NovelChapter
 import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.NovelPages
-import com.numbear.manjuan.core.NovelSpan
+import com.numbear.manjuan.core.NovelScroll
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
@@ -57,7 +67,9 @@ import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
 import com.numbear.manjuan.ui.inkColors
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
@@ -70,6 +82,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var download by remember { mutableStateOf<CacheProgress?>(null) }
     var chapter by remember { mutableIntStateOf(0) }
     var offset by remember { mutableIntStateOf(0) }
+    var anchor by remember { mutableIntStateOf(0) }
     var bookmarks by remember { mutableStateOf<List<BookmarkEntity>>(emptyList()) }
     var chrome by remember { mutableStateOf(true) }
     var showToc by remember { mutableStateOf(false) }
@@ -125,6 +138,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             if (target < next || index == chapters.lastIndex) {
                 chapter = index
                 offset = (target - consumed).coerceAtLeast(0)
+                anchor += 1
                 persist()
                 return
             }
@@ -140,6 +154,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             } else if (chapter > 0) {
                 chapter -= 1
                 offset = 0
+                anchor += 1
                 persist()
             }
         },
@@ -150,6 +165,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             } else if (chapter < chapters.lastIndex) {
                 chapter += 1
                 offset = 0
+                anchor += 1
                 persist()
             }
         },
@@ -187,12 +203,20 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                 } else {
                     ScrollChapter(
-                        chapter = current,
-                        offset = offset,
+                        chapters = novel.chapters,
+                        chapterIndex = safeChapter,
+                        offset = offset.coerceIn(0, current.text.length),
+                        anchor = anchor,
                         settings = settings,
-                        onOffset = {
-                            offset = it
-                            persist()
+                        onPlace = { nextChapter, nextOffset ->
+                            val clamped = nextChapter.coerceIn(0, novel.chapters.lastIndex)
+                            val textLength = novel.chapters[clamped].text.length
+                            val clampedOffset = nextOffset.coerceIn(0, textLength)
+                            if (clamped != chapter || clampedOffset != offset) {
+                                chapter = clamped
+                                offset = clampedOffset
+                                persist()
+                            }
                         },
                         onToggleChrome = { chrome = !chrome },
                     )
@@ -220,7 +244,14 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                             content = colors.foreground,
                         )
                     }
-                    Column(Modifier.align(Alignment.BottomCenter).background(colors.background.copy(alpha = 0.94f)).padding(12.dp)) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(colors.background.copy(alpha = 0.94f))
+                            .navigationBarsPadding()
+                            .padding(12.dp),
+                    ) {
                         PercentSlider(percent(), colors.foreground) { seek(it) }
                         TextButton(onClick = { showBookmarks = true }) { Text("书签") }
                         TextButton(onClick = { showSettings = true }) { Text("版式") }
@@ -239,6 +270,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             onOpen = {
                 chapter = LocatorCodec.chapter(it.locator)
                 offset = 0
+                anchor += 1
                 persist()
                 showToc = false
             },
@@ -252,6 +284,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             onOpen = {
                 chapter = LocatorCodec.chapter(it.locator)
                 offset = LocatorCodec.offset(it.locator)
+                anchor += 1
                 showBookmarks = false
             },
             onDelete = { mark ->
@@ -347,50 +380,151 @@ private fun PageTurn(
 
 @Composable
 private fun ScrollChapter(
-    chapter: NovelChapter,
+    chapters: List<NovelChapter>,
+    chapterIndex: Int,
     offset: Int,
+    anchor: Int,
     settings: ReaderSettings,
-    onOffset: (Int) -> Unit,
+    onPlace: (chapter: Int, offset: Int) -> Unit,
     onToggleChrome: () -> Unit,
 ) {
     val colors = settings.inkColors()
-    val scroll = rememberScrollState()
-    val spans = chapter.spans.ifEmpty { listOf(NovelSpan.Prose(chapter.text)) }
-    LaunchedEffect(chapter) {
-        val fraction = if (chapter.text.isEmpty()) 0f else offset.toFloat() / chapter.text.length
-        scroll.scrollTo((scroll.maxValue * fraction).toInt())
-    }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(scroll)
-            .pointerInput(Unit) { detectTapGestures { onToggleChrome() } }
-            .padding(settings.marginDp.dp),
+    BoxWithConstraints(
+        Modifier.fillMaxSize().pointerInput(onToggleChrome) {
+            detectReaderTap(onToggleChrome)
+        },
     ) {
-        spans.forEach { span ->
-            when (span) {
-                is NovelSpan.Prose -> Text(
-                    span.text,
-                    style = TextStyle(
-                        color = colors.foreground,
-                        fontSize = settings.fontSizeSp.sp,
-                        lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
-                        fontFamily = FontFamily.Serif,
-                    ),
-                )
-                is NovelSpan.Plate -> PlateImage(span.bytes, colors.foreground, Modifier.fillMaxWidth().padding(vertical = 12.dp))
+        val density = LocalDensity.current
+        val margin = settings.marginDp.dp
+        val fontPx = with(density) { settings.fontSizeSp.sp.toPx() }
+        val widthPx = with(density) { (maxWidth - margin * 2).toPx() }.coerceAtLeast(fontPx)
+        val charsPerLine = (widthPx / fontPx).toInt().coerceAtLeast(1)
+        val lineHeightPx = fontPx * settings.lineSpacing
+        val maxChars = remember(charsPerLine, lineHeightPx) {
+            NovelScroll.maxChars(charsPerLine, lineHeightPx)
+        }
+        val entries = remember(chapters, maxChars) { NovelScroll.document(chapters, maxChars) }
+        val listState = rememberLazyListState()
+        var settling by remember { mutableStateOf(true) }
+        LaunchedEffect(anchor, entries) {
+            settling = true
+            try {
+                if (entries.isEmpty()) return@LaunchedEffect
+                val index = NovelScroll.indexAt(entries, chapterIndex, offset).coerceIn(0, entries.lastIndex)
+                listState.scrollToItem(index)
+                val body = entries[index] as? NovelScroll.Entry.Body
+                val words = body?.block as? NovelScroll.Block.Words
+                if (words != null && words.text.isNotEmpty() && offset > words.start) {
+                    val size = withTimeoutOrNull(500) {
+                        snapshotFlow {
+                            listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+                        }.first { it > 0 }
+                    } ?: 0
+                    if (size > 0) {
+                        val fraction = (offset - words.start).coerceIn(0, words.text.length).toFloat() / words.text.length
+                        listState.scrollToItem(index, (fraction * size).toInt().coerceAtLeast(0))
+                    }
+                }
+            } finally {
+                settling = false
+            }
+        }
+        LaunchedEffect(listState, entries) {
+            snapshotFlow {
+                val index = listState.firstVisibleItemIndex
+                val pixel = listState.firstVisibleItemScrollOffset
+                val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+                Triple(index, pixel, size)
+            }.collect { (index, pixel, size) ->
+                if (settling || entries.isEmpty()) return@collect
+                val entry = entries.getOrNull(index) ?: return@collect
+                onPlace(entry.chapter, entryOffset(entry, pixel, size))
+            }
+        }
+        if (entries.isEmpty()) {
+            Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
+        } else {
+            val style = TextStyle(
+                color = colors.foreground,
+                fontSize = settings.fontSizeSp.sp,
+                lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
+                fontFamily = FontFamily.Serif,
+            )
+            val plateCap = with(density) { NovelScroll.MaxBlockPx.toDp() }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(margin),
+            ) {
+                items(count = entries.size, key = { it }) { index ->
+                    val entry = entries[index]
+                    val chapterBreak = index > 0 && entries[index - 1].chapter != entry.chapter
+                    val gap = if (chapterBreak) Modifier.padding(top = 28.dp) else Modifier
+                    when (entry) {
+                        is NovelScroll.Entry.Heading -> Text(
+                            entry.title,
+                            style = style,
+                            modifier = gap.fillMaxWidth().padding(bottom = 12.dp),
+                        )
+                        is NovelScroll.Entry.Body -> when (val block = entry.block) {
+                            is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = gap.fillMaxWidth())
+                            is NovelScroll.Block.Picture -> PlateImage(
+                                block.bytes,
+                                colors.foreground,
+                                gap.fillMaxWidth().heightIn(max = plateCap).padding(vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        val shown = scrollFraction(chapters, entries, listState)
+        LinearProgressIndicator(
+            progress = { shown },
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * Tap toggles chrome. The listener stays on the reader container, not on each lazy row:
+ * a row's pointer coroutine is cancelled when that row scrolls away and that cancellation
+ * was leaving the list unable to scroll further.
+ */
+private suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val start = down.position
+        var moved = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull() ?: return@awaitEachGesture
+            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (!change.pressed) {
+                if (!moved) onTap()
+                return@awaitEachGesture
             }
         }
     }
-    LaunchedEffect(scroll.value, scroll.maxValue, chapter) {
-        if (scroll.maxValue > 0 && chapter.text.isNotEmpty()) {
-            onOffset((scroll.value.toFloat() / scroll.maxValue * chapter.text.length).toInt())
-        }
-    }
-    LinearProgressIndicator(
-        progress = { if (scroll.maxValue == 0) 0f else scroll.value.toFloat() / scroll.maxValue },
-        modifier = Modifier.fillMaxWidth(),
-    )
+}
+
+private fun entryOffset(entry: NovelScroll.Entry, pixel: Int, size: Int): Int {
+    val body = entry as? NovelScroll.Entry.Body ?: return 0
+    val words = body.block as? NovelScroll.Block.Words ?: return body.block.start
+    if (size <= 0 || words.text.isEmpty()) return words.start
+    val within = (words.text.length * (pixel.toFloat() / size)).toInt().coerceIn(0, words.text.length)
+    return words.start + within
+}
+
+private fun scrollFraction(chapters: List<NovelChapter>, entries: List<NovelScroll.Entry>, listState: LazyListState): Float {
+    val total = chapters.sumOf { it.text.length }
+    if (total <= 0 || entries.isEmpty()) return 0f
+    val index = listState.firstVisibleItemIndex.coerceIn(0, entries.lastIndex)
+    val entry = entries[index]
+    val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+    val local = entryOffset(entry, listState.firstVisibleItemScrollOffset, size)
+    val before = chapters.take(entry.chapter).sumOf { it.text.length }
+    return ((before + local).toFloat() / total).coerceIn(0f, 1f)
 }
 
 @Composable

@@ -320,7 +320,7 @@ private fun BookRow(
             Text(book.title.take(1), color = Color.White, style = MaterialTheme.typography.titleMedium)
         }
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
-            Text(book.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+            Text(book.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
             Text(
                 listOf(formatLabel(book.format), source, book.author).filter { it.isNotBlank() }.joinToString(" · "),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
