@@ -3,6 +3,8 @@ package com.numbear.manjuan.reader.text
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -37,6 +39,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -369,7 +373,11 @@ private fun ScrollChapter(
     onToggleChrome: () -> Unit,
 ) {
     val colors = settings.inkColors()
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        Modifier.fillMaxSize().pointerInput(onToggleChrome) {
+            detectReaderTap(onToggleChrome)
+        },
+    ) {
         val density = LocalDensity.current
         val margin = settings.marginDp.dp
         val fontPx = with(density) { settings.fontSizeSp.sp.toPx() }
@@ -437,15 +445,12 @@ private fun ScrollChapter(
                 contentPadding = PaddingValues(margin),
             ) {
                 items(count = blocks.size, key = { it }) { index ->
-                    val tap = Modifier.fillMaxWidth().pointerInput(Unit) {
-                        detectTapGestures { onToggleChrome() }
-                    }
                     when (val block = blocks[index]) {
-                        is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = tap)
+                        is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = Modifier.fillMaxWidth())
                         is NovelScroll.Block.Picture -> PlateImage(
                             block.bytes,
                             colors.foreground,
-                            tap.heightIn(max = plateCap).padding(vertical = 12.dp),
+                            Modifier.fillMaxWidth().heightIn(max = plateCap).padding(vertical = 12.dp),
                         )
                     }
                 }
@@ -456,6 +461,28 @@ private fun ScrollChapter(
             progress = { shown },
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
         )
+    }
+}
+
+/**
+ * Tap toggles chrome. The listener stays on the reader container, not on each lazy row:
+ * a row's pointer coroutine is cancelled when that row scrolls away and that cancellation
+ * was leaving the list unable to scroll further.
+ */
+private suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val start = down.position
+        var moved = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull() ?: return@awaitEachGesture
+            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (!change.pressed) {
+                if (!moved) onTap()
+                return@awaitEachGesture
+            }
+        }
     }
 }
 
