@@ -55,6 +55,12 @@ class CoreLogicTest {
         val folder = FormatDetector.detectDirectory("卷一", listOf("01.jpg", "note.txt"))
         assertEquals(BookFormat.IMAGE_FOLDER, folder.format)
         assertEquals(BookFormat.UNSUPPORTED, FormatDetector.detectDirectory("空", listOf("a.txt")).format)
+
+        assertEquals(BookFormat.MARKDOWN, FormatDetector.detectFile("笔记.md", "# 标题\n正文".toByteArray()).format)
+        assertEquals(BookFormat.MARKDOWN, FormatDetector.detectFile("笔记.markdown", "正文".toByteArray()).format)
+        assertEquals(BookKind.NOVEL, BookFormat.MARKDOWN.kind())
+        assertEquals(BookFormat.UNSUPPORTED, FormatDetector.detectFile("笔记.md", "%PDF-1.7".toByteArray()).format)
+        assertTrue(LibraryNames.isBookFile("笔记.md"))
     }
 
     @Test
@@ -76,6 +82,12 @@ class CoreLogicTest {
         val chapters = TxtChapters.split(text)
         assertEquals(listOf("前言", "第一章 起", "第二章 承"), chapters.map { it.title })
         assertTrue(text.substring(chapters[1].start, chapters[1].end).contains("甲乙丙丁"))
+
+        val markdown = "# 开篇\n甲\n\n## 第二节\n乙\n"
+        assertEquals(listOf("正文"), TxtChapters.split(markdown).map { it.title })
+        val sections = TxtChapters.split(markdown, markdown = true)
+        assertEquals(listOf("开篇", "第二节"), sections.map { it.title })
+        assertTrue(markdown.substring(sections[1].start, sections[1].end).contains("乙"))
 
         val pages = TextPaginator.pages("abcdefghij", charsPerLine = 4, linesPerPage = 2)
         assertEquals(listOf("abcdefgh", "ij"), pages.map { it.text })

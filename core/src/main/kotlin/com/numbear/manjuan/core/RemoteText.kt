@@ -27,10 +27,10 @@ object RemoteText {
         return (page.coerceAtLeast(0) + batch).coerceIn(batch.coerceAtMost(total), total)
     }
 
-    fun novel(title: String, author: String, bytes: ByteArray, totalBytes: Long): NovelContent {
+    fun novel(title: String, author: String, bytes: ByteArray, totalBytes: Long, markdown: Boolean = false): NovelContent {
         val complete = totalBytes >= 0 && bytes.size.toLong() >= totalBytes
         val decoded = decodePrefix(bytes, complete)
-        val chapters = TxtChapters.split(decoded.text).map { chapter ->
+        val chapters = TxtChapters.split(decoded.text, markdown).map { chapter ->
             NovelChapter(chapter.title, decoded.text.substring(chapter.start, chapter.end).trim())
         }.ifEmpty { listOf(NovelChapter("正文", "")) }
         val knownTotal = when {

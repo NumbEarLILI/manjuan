@@ -80,5 +80,6 @@ fun ReaderSettings.inkColors(): InkColors {
 fun formatLabel(format: String): String = when (format) {
     "ZIP_IMAGES" -> "ZIP"
     "IMAGE_FOLDER" -> "图片夹"
+    "MARKDOWN" -> "MD"
     else -> format
 }

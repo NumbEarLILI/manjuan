@@ -77,7 +77,7 @@ fun AddScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("本地", style = MaterialTheme.typography.titleMedium)
-            Text("支持 TXT、EPUB、MOBI、AZW、AZW3、PDF、CBZ、CBR、图片 ZIP，以及以图片为主的文件夹。选择文件夹会递归扫描子目录。无法识别的文件会说明原因。")
+            Text("支持 TXT、Markdown、EPUB、MOBI、AZW、AZW3、PDF、CBZ、CBR、图片 ZIP，以及以图片为主的文件夹。选择文件夹会递归扫描子目录。无法识别的文件会说明原因。")
             Button(onClick = { files.launch(arrayOf("*/*")) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                 Text("选择文件")
             }

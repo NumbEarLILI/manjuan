@@ -2,6 +2,7 @@ package com.numbear.manjuan.core
 
 enum class BookFormat {
     TXT,
+    MARKDOWN,
     EPUB,
     MOBI,
     AZW3,
@@ -20,7 +21,7 @@ enum class BookKind {
 }
 
 fun BookFormat.kind(): BookKind? = when (this) {
-    BookFormat.TXT, BookFormat.EPUB, BookFormat.MOBI, BookFormat.AZW3 -> BookKind.NOVEL
+    BookFormat.TXT, BookFormat.MARKDOWN, BookFormat.EPUB, BookFormat.MOBI, BookFormat.AZW3 -> BookKind.NOVEL
     BookFormat.CBZ, BookFormat.CBR, BookFormat.ZIP_IMAGES, BookFormat.IMAGE_FOLDER -> BookKind.COMIC
     BookFormat.PDF -> BookKind.PDF
     BookFormat.UNSUPPORTED -> null

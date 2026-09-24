@@ -45,7 +45,7 @@ https://github.com/NumbEarLILI/manjuan/releases/tag/manjuan-apk-20260923
 ## 本地导入
 
 1. 打开书架，点右下角加号。
-2. 「选择文件」可以一次选多本：TXT、EPUB、MOBI、AZW3、PDF、CBZ、CBR、图片 ZIP。
+2. 「选择文件」可以一次选多本：TXT、Markdown、EPUB、MOBI、AZW3、PDF、CBZ、CBR、图片 ZIP。
 3. 「选择文件夹」会导入其中的书籍；如果某一层只有图片，会当成一本漫画。
 4. 扩展名和文件头对不上，或压缩包里没有可看的内容时，会直接说明原因，不会静默跳过。
 5. 点进书即阅读。小说可翻页或纵向滚动，漫画可纵向 / 从右向左 / 从左向右。进度和书签记在本机。
