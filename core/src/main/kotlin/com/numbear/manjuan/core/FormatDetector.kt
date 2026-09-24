@@ -3,7 +3,7 @@ package com.numbear.manjuan.core
 object FormatDetector {
     val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
     val bookExtensions = setOf(
-        "txt", "epub", "mobi", "azw", "azw3", "pdf", "cbz", "cbr", "zip",
+        "txt", "md", "markdown", "epub", "mobi", "azw", "azw3", "pdf", "cbz", "cbr", "zip",
     )
 
     fun detectFile(
@@ -25,13 +25,8 @@ object FormatDetector {
         }
 
         return when (ext) {
-            "txt" -> when {
-                zip || pdf || rar || mobi -> Detection(
-                    BookFormat.UNSUPPORTED,
-                    "扩展名是 TXT，但文件内容不是纯文本",
-                )
-                else -> Detection(BookFormat.TXT)
-            }
+            "txt" -> plainText(zip, pdf, rar, mobi, "TXT", BookFormat.TXT)
+            "md", "markdown" -> plainText(zip, pdf, rar, mobi, "Markdown", BookFormat.MARKDOWN)
             "epub" -> when {
                 zip -> Detection(BookFormat.EPUB)
                 else -> Detection(BookFormat.UNSUPPORTED, "这不是有效的 EPUB（缺少 ZIP 文件头）")
@@ -91,6 +86,18 @@ object FormatDetector {
 
     fun extension(name: String): String =
         name.substringAfterLast('.', "").lowercase().substringBefore('?')
+
+    private fun plainText(
+        zip: Boolean,
+        pdf: Boolean,
+        rar: Boolean,
+        mobi: Boolean,
+        label: String,
+        format: BookFormat,
+    ): Detection = when {
+        zip || pdf || rar || mobi -> Detection(BookFormat.UNSUPPORTED, "扩展名是 $label，但文件内容不是纯文本")
+        else -> Detection(format)
+    }
 
     private fun mobiOrError(ok: Boolean, label: String): Detection =
         if (ok) Detection(BookFormat.MOBI) else Detection(

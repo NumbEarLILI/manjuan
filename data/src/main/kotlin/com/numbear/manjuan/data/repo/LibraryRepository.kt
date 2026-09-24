@@ -464,7 +464,7 @@ class LibraryRepository(
                 rememberOpened(book, content.title, content.author, book.format, BookKind.NOVEL.name)
                 return@withContext content
             }
-            if (source?.type == WEBDAV && book.format == BookFormat.TXT.name && !cacheReady(book)) {
+            if (source?.type == WEBDAV && isPlainText(book.format) && !cacheReady(book)) {
                 val saved = database.progress().get(book.id)
                 val content = remoteText(
                     book,
@@ -472,7 +472,7 @@ class LibraryRepository(
                     LocatorCodec.offset(saved?.locator.orEmpty()),
                     onProgress,
                 )
-                rememberOpened(book, content.title, content.author, BookFormat.TXT.name, BookKind.NOVEL.name)
+                rememberOpened(book, content.title, content.author, book.format, BookKind.NOVEL.name)
                 return@withContext content
             }
             val file = ensureFile(book, onProgress)
@@ -495,9 +495,9 @@ class LibraryRepository(
             }
             val format = resolved.format
             val content = when (format) {
-                BookFormat.TXT -> {
+                BookFormat.TXT, BookFormat.MARKDOWN -> {
                     val decoded = TextEncoding.decode(file.readBytes())
-                    val chapters = TxtChapters.split(decoded.text).map { chapter ->
+                    val chapters = TxtChapters.split(decoded.text, markdown = format == BookFormat.MARKDOWN).map { chapter ->
                         NovelChapter(chapter.title, decoded.text.substring(chapter.start, chapter.end).trim())
                     }
                     NovelContent(book.title, book.author, chapters)
@@ -530,9 +530,9 @@ class LibraryRepository(
             if (book.format == BookFormat.MOBI.name || book.format == BookFormat.AZW3.name) {
                 return@withContext remoteGate(book.id).withLock { growMobi(book, onProgress) }
             }
-            if (book.format != BookFormat.TXT.name) return@withContext openNovel(bookId, onProgress)
+            if (!isPlainText(book.format)) return@withContext openNovel(bookId, onProgress)
             val content = remoteGate(book.id).withLock { appendText(book, onProgress) }
-            rememberOpened(book, content.title, content.author, BookFormat.TXT.name, BookKind.NOVEL.name)
+            rememberOpened(book, content.title, content.author, book.format, BookKind.NOVEL.name)
             content
         }
 
@@ -979,7 +979,7 @@ class LibraryRepository(
         val file = streamFile(book.id)
         if (!file.isFile || file.length() == 0L) return null
         val known = book.sizeBytes
-        return RemoteText.novel(book.title, book.author, file.readBytes(), if (known > 0) known else -1L)
+        return textNovel(book, file.readBytes(), if (known > 0) known else -1L)
     }
 
     private suspend fun appendText(book: BookEntity, onProgress: (Long, Long) -> Unit): NovelContent {
@@ -989,7 +989,7 @@ class LibraryRepository(
         val known = book.sizeBytes
         if (known > 0 && loaded >= known) {
             finalizeText(book, file)
-            return RemoteText.novel(book.title, book.author, file.readBytes(), known)
+            return textNovel(book, file.readBytes(), known)
         }
         currentCoroutineContext().ensureActive()
         val remote = client(requireSource(book.sourceId))
@@ -1003,7 +1003,7 @@ class LibraryRepository(
             database.books().update(current.copy(sizeBytes = total))
             if (file.isFile) finalizeText(current, file)
             val bytes = if (file.isFile) file.readBytes() else ByteArray(0)
-            return RemoteText.novel(book.title, book.author, bytes, total)
+            return textNovel(book, bytes, total)
         }
         file.appendBytes(part.bytes)
         val combinedSize = file.length()
@@ -1017,7 +1017,7 @@ class LibraryRepository(
         val done = total >= 0 && combinedSize >= total
         onProgress(combinedSize, if (done) combinedSize else -1L)
         if (done) finalizeText(database.books().get(book.id) ?: current, file)
-        return RemoteText.novel(book.title, book.author, file.readBytes(), if (done) combinedSize else total)
+        return textNovel(book, file.readBytes(), if (done) combinedSize else total)
     }
 
     private suspend fun finalizeText(book: BookEntity, file: File) {
@@ -1128,8 +1128,15 @@ class LibraryRepository(
         }
     }
 
+    private fun isPlainText(format: String): Boolean =
+        format == BookFormat.TXT.name || format == BookFormat.MARKDOWN.name
+
+    private fun textNovel(book: BookEntity, bytes: ByteArray, totalBytes: Long) =
+        RemoteText.novel(book.title, book.author, bytes, totalBytes, markdown = book.format == BookFormat.MARKDOWN.name)
+
     private fun streamsWithoutWholeFile(format: String): Boolean = format in setOf(
         BookFormat.TXT.name,
+        BookFormat.MARKDOWN.name,
         BookFormat.EPUB.name,
         BookFormat.MOBI.name,
         BookFormat.AZW3.name,

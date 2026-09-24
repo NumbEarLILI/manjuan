@@ -41,6 +41,9 @@ class WebDavBookRouteTest {
         val novel = WebDavBooks.classify("notes.txt", "/dav/notes.txt", directory = false, text)
         assertEquals(BookFormat.TXT, novel.format)
         assertEquals(BookKind.NOVEL, novel.format.kind())
+        val markdown = WebDavBooks.classify("笔记.md", "/dav/笔记.md", directory = false, "# 第一章\n甲".toByteArray())
+        assertEquals(BookFormat.MARKDOWN, markdown.format)
+        assertEquals(BookKind.NOVEL, markdown.format.kind())
     }
 
     @Test
