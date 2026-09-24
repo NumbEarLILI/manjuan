@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -276,6 +277,35 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             novel != null -> {
                 val safeChapter = chapter.coerceIn(0, novel.chapters.lastIndex)
                 val current = novel.chapters[safeChapter]
+                Column(Modifier.fillMaxSize()) {
+                if (chrome) {
+                    ReaderTopBar(
+                        title = novel.chapters[safeChapter].title,
+                        bookmarked = bookmarks.any { LocatorCodec.chapter(it.locator) == safeChapter },
+                        onBack = onBack,
+                        onBookmark = {
+                            scope.launch {
+                                val locator = LocatorCodec.novel(safeChapter, offset)
+                                val existing = bookmarks.find { it.locator == locator }
+                                if (existing != null) {
+                                    app.library.deleteBookmark(existing.id)
+                                } else {
+                                    app.library.addBookmark(bookId, locator, "${novel.chapters[safeChapter].title} ${(percent() * 100).toInt()}%")
+                                }
+                                bookmarks = app.library.bookmarks(bookId)
+                            }
+                        },
+                        onToc = { showToc = true },
+                        container = colors.background,
+                        content = colors.foreground,
+                    )
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .then(if (chrome) Modifier else Modifier.statusBarsPadding().navigationBarsPadding()),
+                ) {
                 if (settings.pageMode) {
                     PageTurn(
                         chapter = current,
@@ -332,36 +362,14 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                 if (loadingMore || catchingUp) {
                     Text(
                         if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
-                        modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
                         color = colors.foreground,
                     )
                 }
+                }
                 if (chrome) {
-                    Column(Modifier.align(Alignment.TopCenter)) {
-                        ReaderTopBar(
-                            title = novel.chapters[safeChapter].title,
-                            bookmarked = bookmarks.any { LocatorCodec.chapter(it.locator) == safeChapter },
-                            onBack = onBack,
-                            onBookmark = {
-                                scope.launch {
-                                    val locator = LocatorCodec.novel(safeChapter, offset)
-                                    val existing = bookmarks.find { it.locator == locator }
-                                    if (existing != null) {
-                                        app.library.deleteBookmark(existing.id)
-                                    } else {
-                                        app.library.addBookmark(bookId, locator, "${novel.chapters[safeChapter].title} ${(percent() * 100).toInt()}%")
-                                    }
-                                    bookmarks = app.library.bookmarks(bookId)
-                                }
-                            },
-                            onToc = { showToc = true },
-                            container = colors.background,
-                            content = colors.foreground,
-                        )
-                    }
                     Column(
                         Modifier
-                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .background(colors.background.copy(alpha = 0.94f))
                             .navigationBarsPadding()
@@ -371,6 +379,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         TextButton(onClick = { showBookmarks = true }) { Text("书签") }
                         TextButton(onClick = { showSettings = true }) { Text("版式") }
                     }
+                }
                 }
             }
         }
@@ -432,8 +441,10 @@ private fun PageTurn(
         val fontPx = with(density) { settings.fontSizeSp.sp.toPx() }
         val widthPx = with(density) { (maxWidth - margin * 2).toPx() }.coerceAtLeast(fontPx)
         val heightPx = with(density) { (maxHeight - margin * 2).toPx() }.coerceAtLeast(fontPx)
-        val charsPerLine = (widthPx / fontPx).toInt().coerceAtLeast(6)
-        val lines = (heightPx / (fontPx * settings.lineSpacing)).toInt().coerceAtLeast(3)
+        // Glyphs are a little wider than the font size, and the last line needs
+        // room for its descent. Overestimating either one clips a line off the page.
+        val charsPerLine = (widthPx / (fontPx * 1.12f)).toInt().coerceAtLeast(6)
+        val lines = ((heightPx / (fontPx * settings.lineSpacing)).toInt() - 1).coerceAtLeast(3)
         val pages = remember(chapter, charsPerLine, lines) { NovelPages.pages(chapter, charsPerLine, lines) }
         if (pages.isEmpty()) {
             Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
