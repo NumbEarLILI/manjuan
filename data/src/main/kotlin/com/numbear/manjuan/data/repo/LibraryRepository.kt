@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import com.numbear.manjuan.core.BookCache
 import com.numbear.manjuan.core.BookFormat
 import com.numbear.manjuan.core.BookKind
 import com.numbear.manjuan.core.CbrExtractor
@@ -57,6 +58,22 @@ class LibraryRepository(
     private val cipher: WebDavCipher,
 ) {
     fun observeBooks(): Flow<List<BookEntity>> = database.books().observeAll()
+
+    suspend fun cacheSize(): Long = withContext(Dispatchers.IO) {
+        BookCache.size(File(context.filesDir, BookCache.DIR))
+    }
+
+    suspend fun clearCache(): Long = withContext(Dispatchers.IO) {
+        val root = File(context.filesDir, BookCache.DIR)
+        val freed = BookCache.size(root)
+        root.deleteRecursively()
+        database.books().all().forEach { book ->
+            if (BookCache.storedInside(root.absolutePath, book.cachedPath)) {
+                database.books().update(book.copy(cachedPath = ""))
+            }
+        }
+        freed
+    }
 
     fun observeSources(): Flow<List<SourceEntity>> = database.sources().observeAll()
 
@@ -309,7 +326,7 @@ class LibraryRepository(
             return@withContext
         }
         val remote = client(source)
-        val destDir = File(context.filesDir, "cache-books/${book.id}").apply { mkdirs() }
+        val destDir = File(context.filesDir, "${BookCache.DIR}/${book.id}").apply { mkdirs() }
         val remoteName = WebDavBooks.displayFileName(book.title, book.remotePath.ifBlank { book.location })
         val cached = if (book.format == BookFormat.IMAGE_FOLDER.name) {
             val children = blockingWebDav { remote.list(book.remotePath.ifBlank { book.location }) }
@@ -471,7 +488,7 @@ class LibraryRepository(
                 }
                 BookFormat.CBR -> {
                     val file = ensureFile(book, onProgress)
-                    val dir = File(context.filesDir, "cache-books/${book.id}/images")
+                    val dir = File(context.filesDir, "${BookCache.DIR}/${book.id}/images")
                     val existing = sortedImages(dir)
                     val files = existing.ifEmpty { CbrExtractor.extractImages(file, dir) }
                     PagedContent(book.title, format, files.map { PageRef.FilePage(it.absolutePath) }, null, 0)
@@ -479,7 +496,7 @@ class LibraryRepository(
                 BookFormat.MOBI, BookFormat.AZW3 -> {
                     val file = ensureFile(book, onProgress)
                     val images = MobiParser.imagePages(file)
-                    val dir = File(context.filesDir, "cache-books/${book.id}/mobi-pages")
+                    val dir = File(context.filesDir, "${BookCache.DIR}/${book.id}/mobi-pages")
                     dir.mkdirs()
                     dir.listFiles()?.forEach { it.delete() }
                     val pages = images.mapIndexed { index, bytes ->
@@ -753,7 +770,7 @@ class LibraryRepository(
     }
 
     private fun extractZip(bookId: Long, zipFile: File): List<File> {
-        val dir = File(context.filesDir, "cache-books/$bookId/images")
+        val dir = File(context.filesDir, "${BookCache.DIR}/$bookId/images")
         val existing = sortedImages(dir)
         if (existing.isNotEmpty()) return existing
         dir.mkdirs()
@@ -793,7 +810,7 @@ class LibraryRepository(
                 file.parentFile?.takeIf { it.absolutePath.startsWith(root) && it.name.length > 8 }?.deleteRecursively()
             }
         }
-        File(context.filesDir, "cache-books/${book.id}").deleteRecursively()
+        File(context.filesDir, "${BookCache.DIR}/${book.id}").deleteRecursively()
         File(context.filesDir, "local").walkTopDown().maxDepth(2).forEach { dir ->
             if (dir.isDirectory && dir.list()?.isEmpty() == true) dir.delete()
         }

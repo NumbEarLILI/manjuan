@@ -49,6 +49,9 @@ interface BookDao {
 
     @Query("SELECT * FROM books WHERE sourceId = :sourceId AND remotePath = :remotePath")
     suspend fun listRemote(sourceId: Long, remotePath: String): List<BookEntity>
+
+    @Query("SELECT * FROM books")
+    suspend fun all(): List<BookEntity>
 }
 
 @Dao

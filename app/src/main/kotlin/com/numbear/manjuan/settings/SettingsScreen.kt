@@ -11,6 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -20,11 +22,16 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,6 +48,13 @@ fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
     val app = LocalContext.current.applicationContext as ManjuanApp
     val settings by app.settings.settings.collectAsState(initial = ReaderSettings())
     val scope = rememberCoroutineScope()
+    var cacheBytes by remember { mutableStateOf<Long?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var clearing by remember { mutableStateOf(false) }
+    var cleared by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        cacheBytes = app.library.cacheSize()
+    }
     fun update(next: ReaderSettings) {
         scope.launch { app.settings.update { next } }
     }
@@ -120,6 +134,62 @@ fun SettingsScreen(onBack: () -> Unit, onBrowse: (Long) -> Unit) {
             }
 
             WebDavAccountSection(onBrowse)
+
+            Text("缓存", style = MaterialTheme.typography.titleMedium)
+            Text(
+                when (val bytes = cacheBytes) {
+                    null -> "正在计算占用…"
+                    else -> "已用 ${formatBytes(bytes)}"
+                },
+            )
+            if (cleared) Text("已清除")
+            Button(
+                onClick = { confirmClear = true },
+                enabled = !clearing,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (clearing) "正在清除" else "清除缓存")
+            }
         }
     }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { if (!clearing) confirmClear = false },
+            title = { Text("清除缓存") },
+            text = {
+                Text("将删除网盘下载的文件，以及阅读时解压生成的临时文件。书架、阅读进度和本机导入的书都会保留。下次打开未缓存的书时会重新下载。")
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !clearing,
+                    onClick = {
+                        clearing = true
+                        scope.launch {
+                            try {
+                                app.library.clearCache()
+                                cleared = true
+                            } finally {
+                                cacheBytes = runCatching { app.library.cacheSize() }.getOrDefault(cacheBytes)
+                                clearing = false
+                                confirmClear = false
+                            }
+                        }
+                    },
+                ) { Text("清除") }
+            },
+            dismissButton = {
+                TextButton(enabled = !clearing, onClick = { confirmClear = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return "%.1f KB".format(kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return "%.1f MB".format(mb)
+    return "%.2f GB".format(mb / 1024.0)
 }
