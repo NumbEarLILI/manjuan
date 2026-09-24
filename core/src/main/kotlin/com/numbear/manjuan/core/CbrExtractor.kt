@@ -7,19 +7,24 @@ import java.io.File
 import java.io.FileOutputStream
 
 object CbrExtractor {
-    fun extractImages(rar: File, destDir: File): List<File> {
+    fun extractImages(rar: File, destDir: File, only: Set<String>? = null, solidPrefix: Boolean = false): List<File> {
         destDir.mkdirs()
         try {
             Archive(rar).use { archive ->
                 val written = ArrayList<File>()
+                val pending = only?.toMutableSet()
                 for (header in archive) {
                     if (header.isDirectory) continue
                     val name = header.fileName.ifBlank { "page" }
                     if (!FormatDetector.isImageName(name)) continue
+                    val wanted = pending == null || matches(name, pending)
+                    if (!wanted && !solidPrefix) continue
                     val safe = name.substringAfterLast('/').substringAfterLast('\\').ifBlank { "page-${written.size}.img" }
                     val out = unique(destDir, safe)
                     FileOutputStream(out).use { stream -> archive.extractFile(header, stream) }
                     written += out
+                    pending?.removeAll { matches(name, setOf(it)) }
+                    if (pending != null && pending.isEmpty()) break
                 }
                 if (written.isEmpty()) throw UnsupportedBookException("CBR 里没有可显示的图片")
                 return written.sortedWith(compareBy(NaturalSort) { it.name })
@@ -33,6 +38,12 @@ object CbrExtractor {
         } catch (error: Exception) {
             throw UnsupportedBookException("无法解压 CBR：${error.message ?: "未知错误"}")
         }
+    }
+
+    private fun matches(name: String, names: Set<String>): Boolean {
+        if (name in names) return true
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        return base in names || names.any { it.substringAfterLast('/').substringAfterLast('\\') == base }
     }
 
     private fun unique(dir: File, name: String): File {

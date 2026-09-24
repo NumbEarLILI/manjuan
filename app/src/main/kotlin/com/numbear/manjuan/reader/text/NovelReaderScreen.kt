@@ -3,8 +3,6 @@ package com.numbear.manjuan.reader.text
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,6 +14,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -40,8 +39,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -58,9 +55,12 @@ import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.NovelPages
 import com.numbear.manjuan.core.NovelScroll
 import com.numbear.manjuan.core.ReaderSettings
+import com.numbear.manjuan.core.RemoteText
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
 import com.numbear.manjuan.reader.common.ReaderLoading
+import com.numbear.manjuan.reader.common.SegmentLoading
+import com.numbear.manjuan.reader.common.detectReaderTap
 import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
@@ -89,6 +89,10 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var showBookmarks by remember { mutableStateOf(false) }
     var pageCommand by remember { mutableIntStateOf(0) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var catchingUp by remember { mutableStateOf(false) }
+    var catchChapter by remember { mutableIntStateOf(0) }
+    var catchOffset by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(bookId) {
         loading = true
@@ -96,9 +100,22 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
         try {
             content = app.library.openNovel(bookId) { read, total -> download = CacheProgress(read, total) }
             val saved = app.library.progress(bookId)
-            chapter = LocatorCodec.chapter(saved?.locator.orEmpty())
-            offset = LocatorCodec.offset(saved?.locator.orEmpty())
+            val savedChapter = LocatorCodec.chapter(saved?.locator.orEmpty())
+            val savedOffset = LocatorCodec.offset(saved?.locator.orEmpty())
             bookmarks = app.library.bookmarks(bookId)
+            val opened = content
+            val reached = opened == null || RemoteText.covered(opened.chapters, savedChapter, savedOffset, !opened.more)
+            if (reached) {
+                chapter = savedChapter
+                offset = savedOffset
+                catchingUp = false
+            } else {
+                chapter = 0
+                offset = 0
+                catchChapter = savedChapter
+                catchOffset = savedOffset
+                catchingUp = true
+            }
             error = null
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -106,6 +123,31 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             error = failure.message ?: "无法打开"
         } finally {
             loading = false
+        }
+    }
+
+    LaunchedEffect(bookId, catchingUp) {
+        if (!catchingUp) return@LaunchedEffect
+        val targetChapter = catchChapter
+        val targetOffset = catchOffset
+        try {
+            var latest = content ?: return@LaunchedEffect
+            while (latest.more && !RemoteText.covered(latest.chapters, targetChapter, targetOffset, complete = false)) {
+                loadingMore = true
+                latest = app.library.extendNovel(bookId)
+                content = latest
+            }
+            if (targetChapter <= latest.chapters.lastIndex) {
+                chapter = targetChapter
+                offset = targetOffset.coerceIn(0, latest.chapters[targetChapter].text.length)
+                anchor += 1
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+        } finally {
+            loadingMore = false
+            catchingUp = false
         }
     }
 
@@ -121,29 +163,86 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
         return total
     }
-    fun percent(): Float = globalOffset().toFloat() / totalChars()
+    fun percent(): Float {
+        val current = novel
+        if (current != null && current.more && current.totalBytes > 0) {
+            val loadedChars = totalChars().coerceAtLeast(1)
+            val readBytes = current.loadedBytes * globalOffset().coerceAtMost(loadedChars) / loadedChars
+            return (readBytes.toFloat() / current.totalBytes).coerceIn(0f, 0.99f)
+        }
+        return globalOffset().toFloat() / totalChars()
+    }
+
+    fun requestMore() {
+        val current = content ?: return
+        if (!current.more || loadingMore) return
+        loadingMore = true
+        scope.launch {
+            try {
+                content = app.library.extendNovel(bookId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+            } finally {
+                loadingMore = false
+            }
+        }
+    }
 
     fun persist() {
+        if (catchingUp) return
         scope.launch {
             app.library.saveProgress(bookId, LocatorCodec.novel(chapter, offset), percent())
         }
     }
 
-    fun seek(targetPercent: Float) {
-        val chapters = novel?.chapters ?: return
-        val target = (targetPercent.coerceIn(0f, 1f) * totalChars()).toInt()
+    fun place(targetPercent: Float, novelNow: com.numbear.manjuan.core.NovelContent) {
+        val chaptersNow = novelNow.chapters
+        if (chaptersNow.isEmpty()) return
+        val total = chaptersNow.sumOf { it.text.length }.coerceAtLeast(1)
+        val target = (targetPercent.coerceIn(0f, 1f) * total).toInt()
         var consumed = 0
-        chapters.forEachIndexed { index, item ->
+        chaptersNow.forEachIndexed { index, item ->
             val next = consumed + item.text.length
-            if (target < next || index == chapters.lastIndex) {
+            if (target < next || index == chaptersNow.lastIndex) {
                 chapter = index
-                offset = (target - consumed).coerceAtLeast(0)
+                offset = (target - consumed).coerceIn(0, item.text.length)
                 anchor += 1
                 persist()
                 return
             }
             consumed = next
         }
+    }
+
+    fun seek(targetPercent: Float) {
+        catchingUp = false
+        val current = novel ?: return
+        if (current.more && current.totalBytes > 0) {
+            val targetBytes = (targetPercent.coerceIn(0f, 1f) * current.totalBytes).toLong()
+            if (targetBytes > current.loadedBytes) {
+                scope.launch {
+                    loadingMore = true
+                    try {
+                        var latest = current
+                        while (latest.more && latest.loadedBytes < targetBytes) {
+                            latest = app.library.extendNovel(bookId)
+                            content = latest
+                        }
+                        place(targetBytes.toFloat() / latest.loadedBytes.coerceAtLeast(1), latest)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } finally {
+                        loadingMore = false
+                    }
+                }
+                return
+            }
+            val fraction = targetBytes.toFloat() / current.loadedBytes.coerceAtLeast(1)
+            place(fraction, current)
+            return
+        }
+        place(targetPercent, current)
     }
 
     BindReadingChrome(
@@ -167,6 +266,8 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                 offset = 0
                 anchor += 1
                 persist()
+            } else if (novel?.more == true) {
+                requestMore()
             }
         },
     )
@@ -181,6 +282,35 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             novel != null -> {
                 val safeChapter = chapter.coerceIn(0, novel.chapters.lastIndex)
                 val current = novel.chapters[safeChapter]
+                Column(Modifier.fillMaxSize()) {
+                if (chrome) {
+                    ReaderTopBar(
+                        title = novel.chapters[safeChapter].title,
+                        bookmarked = bookmarks.any { LocatorCodec.chapter(it.locator) == safeChapter },
+                        onBack = onBack,
+                        onBookmark = {
+                            scope.launch {
+                                val locator = LocatorCodec.novel(safeChapter, offset)
+                                val existing = bookmarks.find { it.locator == locator }
+                                if (existing != null) {
+                                    app.library.deleteBookmark(existing.id)
+                                } else {
+                                    app.library.addBookmark(bookId, locator, "${novel.chapters[safeChapter].title} ${(percent() * 100).toInt()}%")
+                                }
+                                bookmarks = app.library.bookmarks(bookId)
+                            }
+                        },
+                        onToc = { showToc = true },
+                        container = colors.background,
+                        content = colors.foreground,
+                    )
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .then(if (chrome) Modifier else Modifier.statusBarsPadding().navigationBarsPadding()),
+                ) {
                 if (settings.pageMode) {
                     PageTurn(
                         chapter = current,
@@ -188,8 +318,13 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         settings = settings,
                         pageCommand = pageCommand,
                         onOffset = {
+                            if (catchingUp) return@PageTurn
                             offset = it
                             persist()
+                            val current = content
+                            if (current != null && !RemoteText.covered(current.chapters, chapter, it, !current.more)) {
+                                requestMore()
+                            }
                         },
                         onChapterDelta = { delta ->
                             val next = (safeChapter + delta).coerceIn(0, novel.chapters.lastIndex)
@@ -197,6 +332,8 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                                 chapter = next
                                 offset = if (delta < 0) novel.chapters[next].text.length else 0
                                 persist()
+                            } else if (delta > 0 && novel.more) {
+                                requestMore()
                             }
                         },
                         onToggleChrome = { chrome = !chrome },
@@ -208,7 +345,9 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         offset = offset.coerceIn(0, current.text.length),
                         anchor = anchor,
                         settings = settings,
+                        showProgress = chrome,
                         onPlace = { nextChapter, nextOffset ->
+                            if (catchingUp) return@ScrollChapter
                             val clamped = nextChapter.coerceIn(0, novel.chapters.lastIndex)
                             val textLength = novel.chapters[clamped].text.length
                             val clampedOffset = nextOffset.coerceIn(0, textLength)
@@ -217,36 +356,26 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                                 offset = clampedOffset
                                 persist()
                             }
+                            val current = content
+                            if (current != null && !RemoteText.covered(current.chapters, clamped, clampedOffset, !current.more)) {
+                                requestMore()
+                            }
                         },
                         onToggleChrome = { chrome = !chrome },
                     )
                 }
+                if (loadingMore || catchingUp) {
+                    SegmentLoading(
+                        message = if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
+                        color = colors.foreground,
+                        container = colors.background,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+                    )
+                }
+                }
                 if (chrome) {
-                    Column(Modifier.align(Alignment.TopCenter)) {
-                        ReaderTopBar(
-                            title = novel.chapters[safeChapter].title,
-                            bookmarked = bookmarks.any { LocatorCodec.chapter(it.locator) == safeChapter },
-                            onBack = onBack,
-                            onBookmark = {
-                                scope.launch {
-                                    val locator = LocatorCodec.novel(safeChapter, offset)
-                                    val existing = bookmarks.find { it.locator == locator }
-                                    if (existing != null) {
-                                        app.library.deleteBookmark(existing.id)
-                                    } else {
-                                        app.library.addBookmark(bookId, locator, "${novel.chapters[safeChapter].title} ${(percent() * 100).toInt()}%")
-                                    }
-                                    bookmarks = app.library.bookmarks(bookId)
-                                }
-                            },
-                            onToc = { showToc = true },
-                            container = colors.background,
-                            content = colors.foreground,
-                        )
-                    }
                     Column(
                         Modifier
-                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .background(colors.background.copy(alpha = 0.94f))
                             .navigationBarsPadding()
@@ -256,6 +385,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         TextButton(onClick = { showBookmarks = true }) { Text("书签") }
                         TextButton(onClick = { showSettings = true }) { Text("版式") }
                     }
+                }
                 }
             }
         }
@@ -317,8 +447,10 @@ private fun PageTurn(
         val fontPx = with(density) { settings.fontSizeSp.sp.toPx() }
         val widthPx = with(density) { (maxWidth - margin * 2).toPx() }.coerceAtLeast(fontPx)
         val heightPx = with(density) { (maxHeight - margin * 2).toPx() }.coerceAtLeast(fontPx)
-        val charsPerLine = (widthPx / fontPx).toInt().coerceAtLeast(6)
-        val lines = (heightPx / (fontPx * settings.lineSpacing)).toInt().coerceAtLeast(3)
+        // Glyphs are a little wider than the font size, and the last line needs
+        // room for its descent. Overestimating either one clips a line off the page.
+        val charsPerLine = (widthPx / (fontPx * 1.12f)).toInt().coerceAtLeast(6)
+        val lines = ((heightPx / (fontPx * settings.lineSpacing)).toInt() - 1).coerceAtLeast(3)
         val pages = remember(chapter, charsPerLine, lines) { NovelPages.pages(chapter, charsPerLine, lines) }
         if (pages.isEmpty()) {
             Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
@@ -385,6 +517,7 @@ private fun ScrollChapter(
     offset: Int,
     anchor: Int,
     settings: ReaderSettings,
+    showProgress: Boolean,
     onPlace: (chapter: Int, offset: Int) -> Unit,
     onToggleChrome: () -> Unit,
 ) {
@@ -478,32 +611,12 @@ private fun ScrollChapter(
                 }
             }
         }
-        val shown = scrollFraction(chapters, entries, listState)
-        LinearProgressIndicator(
-            progress = { shown },
-            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
-        )
-    }
-}
-
-/**
- * Tap toggles chrome. The listener stays on the reader container, not on each lazy row:
- * a row's pointer coroutine is cancelled when that row scrolls away and that cancellation
- * was leaving the list unable to scroll further.
- */
-private suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        val start = down.position
-        var moved = false
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val change = event.changes.firstOrNull() ?: return@awaitEachGesture
-            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
-            if (!change.pressed) {
-                if (!moved) onTap()
-                return@awaitEachGesture
-            }
+        if (showProgress) {
+            val shown = scrollFraction(chapters, entries, listState)
+            LinearProgressIndicator(
+                progress = { shown },
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+            )
         }
     }
 }
