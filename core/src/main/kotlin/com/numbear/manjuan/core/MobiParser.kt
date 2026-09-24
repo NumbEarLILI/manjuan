@@ -56,7 +56,7 @@ object MobiParser {
         }
         val headerIndex = best?.headerIndex ?: markupHeader
         val images = collectImages(bytes, offsets, headerIndex)
-        val letters = best?.score ?: 0
+        val letters = best?.let { proseLetters(it.plain) } ?: 0
         if (letters >= MIN_READABLE) return Opening(best!!.toNovel(), images, false)
         if (sawHuff) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
         if (sawEncrypted) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
@@ -324,9 +324,14 @@ object MobiParser {
         return DecodedPlain(HtmlText.toPlain(html), html)
     }
 
-    private fun readableScore(plain: String): Int {
+    private fun readableScore(plain: String): Int = proseLetters(plain)
+
+    /** Page captions such as 第 138 頁 are not prose; they must not keep an image book in the novel reader. */
+    private val pageCaption = Regex("""第\s*[0-9０-９]+\s*[頁页]""")
+
+    private fun proseLetters(plain: String): Int {
         if (plain.isBlank()) return 0
-        return plain.count { it.isLetter() }
+        return pageCaption.replace(plain, "").count { it.isLetter() }
     }
 
     private data class Extracted(

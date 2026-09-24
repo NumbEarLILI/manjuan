@@ -460,6 +460,51 @@ class MobiParserTest {
     }
 
     @Test
+    fun pageNumberCaptionsWithImagesOpenAsPagesNotProse() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = (1..4).joinToString("\n") { index ->
+            "<p>第 $index 頁</p><img recindex=\"${index.toString().padStart(5, '0')}\"/><mbp:pagebreak/>"
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertEquals(listOf("png", "png", "gif"), opening.images.map { ImageSniff.extension(it) })
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun proseThatMentionsAPageNumberStaysANovel() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在第 3 页的江心。</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, png),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(!opening.pictureBook)
+        val text = opening.novel!!.chapters.joinToString("") { it.text }
+        assertTrue(text.contains("潮水"))
+        assertTrue(text.contains("江心"))
+        file.delete()
+    }
+
+    @Test
     fun proseWithACoverImageStaysANovel() {
         val png = tinyPng()
         val html = "<p>第一章潮水很深，船还在江心。</p><mbp:pagebreak/><img recindex=\"00001\" alt=\"彩页\"/>".toByteArray(Charsets.UTF_8)
