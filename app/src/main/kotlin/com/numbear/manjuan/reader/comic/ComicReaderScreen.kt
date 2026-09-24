@@ -10,6 +10,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -319,12 +320,15 @@ private fun ZoomImage(bitmap: Bitmap, fit: String, vertical: Boolean) {
             modifier = Modifier.verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()).then(transform),
             contentScale = ContentScale.None,
         )
-        vertical || fit == "WIDTH" -> Image(
-            image,
-            contentDescription = null,
-            modifier = Modifier.fillMaxWidth().then(transform),
-            contentScale = ContentScale.FillWidth,
-        )
+        vertical || fit == "WIDTH" -> {
+            val ratio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+            Image(
+                image,
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth().aspectRatio(ratio).then(transform),
+                contentScale = ContentScale.FillWidth,
+            )
+        }
         fit == "HEIGHT" -> Image(
             image,
             contentDescription = null,

@@ -484,6 +484,53 @@ class MobiParserTest {
     }
 
     @Test
+    fun barePageNumbersWithImagesOpenAsPagesNotProse() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = (1..4).joinToString("\n") { index ->
+            "<p>${index}页</p><img recindex=\"${index.toString().padStart(5, '0')}\"/><mbp:pagebreak/>"
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(3, opening.images.size)
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun novelMobiShowsRecindexImageInsteadOfOnlyThePageCaption() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在江心。</p><p>第 2 页</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val chapter = MobiParser.parse(file).chapters.single()
+        val plates = chapter.spans.filterIsInstance<NovelSpan.Plate>()
+        assertEquals(1, plates.size)
+        assertTrue(plates.single().bytes.contentEquals(png))
+        val prose = chapter.spans.filterIsInstance<NovelSpan.Prose>().joinToString("") { it.text }
+        assertTrue(prose.contains("潮水"))
+        assertTrue(prose.contains("江心"))
+        assertTrue(!prose.contains("第 2 页"))
+        file.delete()
+    }
+
+    @Test
     fun proseThatMentionsAPageNumberStaysANovel() {
         val png = tinyPng()
         val html = "<p>第一章潮水很深，船还在第 3 页的江心。</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)

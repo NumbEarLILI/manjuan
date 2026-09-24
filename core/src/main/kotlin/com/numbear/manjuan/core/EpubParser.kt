@@ -46,6 +46,7 @@ object EpubParser {
                             if (plain.isNotBlank()) spans += NovelSpan.Prose(plain)
                         }
                         is HtmlText.Block.Image -> {
+                            if (block.href.isBlank()) continue
                             val imagePath = resolveZipPath(chapterDir, block.href)
                             val image = zip.readBytes(imagePath) ?: continue
                             val payload = ImageSniff.extract(image) ?: continue

@@ -57,7 +57,7 @@ object MobiParser {
         val headerIndex = best?.headerIndex ?: markupHeader
         val images = collectImages(bytes, offsets, headerIndex)
         val letters = best?.let { proseLetters(it.plain) } ?: 0
-        if (letters >= MIN_READABLE) return Opening(best!!.toNovel(), images, false)
+        if (letters >= MIN_READABLE) return Opening(best!!.toNovel(images), images, false)
         if (sawHuff) throw UnsupportedBookException("此 MOBI 使用 Huff/CDIC 压缩，暂不支持")
         if (sawEncrypted) throw UnsupportedBookException("此 MOBI 已加密，暂不支持")
         // Comic only when almost no prose remains and there is a real page run.
@@ -326,13 +326,16 @@ object MobiParser {
 
     private fun readableScore(plain: String): Int = proseLetters(plain)
 
-    /** Page captions such as 第 138 頁 are not prose; they must not keep an image book in the novel reader. */
-    private val pageCaption = Regex("""第\s*[0-9０-９]+\s*[頁页]""")
+    /** Page captions such as 第 138 頁 or 138页 are not prose. */
+    private val pageCaption = Regex("""(?i)(?:第\s*)?[0-9０-９]{1,6}\s*[頁页]|page\s*[0-9]{1,6}|[-—–]\s*[0-9０-９]{1,6}\s*[-—–]""")
 
     private fun proseLetters(plain: String): Int {
         if (plain.isBlank()) return 0
         return pageCaption.replace(plain, "").count { it.isLetter() }
     }
+
+    private fun isCaptionOnly(plain: String): Boolean =
+        pageCaption.replace(plain, "").none { it.isLetter() }
 
     private data class Extracted(
         val plain: String,
@@ -341,11 +344,39 @@ object MobiParser {
         val html: String,
         val headerIndex: Int,
     ) {
-        fun toNovel(): NovelContent {
+        fun toNovel(images: List<ByteArray>): NovelContent {
+            val spanned = imageSpans(html, images)
+            if (spanned.any { it is NovelSpan.Plate }) {
+                val text = spanned.filterIsInstance<NovelSpan.Prose>().joinToString("\n") { it.text }
+                val heading = TxtChapters.split(text).firstOrNull()?.title ?: "正文"
+                return NovelContent(title, "", listOf(NovelChapter(heading, text, spanned)))
+            }
             val chapters = TxtChapters.split(plain).map { chapter ->
                 NovelChapter(chapter.title, plain.substring(chapter.start, chapter.end).trim())
             }
             return NovelContent(title, "", chapters.ifEmpty { listOf(NovelChapter("正文", plain)) })
+        }
+
+        private fun imageSpans(html: String, images: List<ByteArray>): List<NovelSpan> {
+            if (images.isEmpty()) return emptyList()
+            val spans = ArrayList<NovelSpan>()
+            for (block in HtmlText.blocks(html)) {
+                when (block) {
+                    is HtmlText.Block.Text -> {
+                        val kept = HtmlText.toPlain(block.html)
+                            .lineSequence()
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() && !isCaptionOnly(it) }
+                            .joinToString("\n")
+                        if (kept.isNotEmpty()) spans += NovelSpan.Prose(kept)
+                    }
+                    is HtmlText.Block.Image -> {
+                        val index = block.recindex
+                        if (index in 1..images.size) spans += NovelSpan.Plate(images[index - 1])
+                    }
+                }
+            }
+            return spans
         }
     }
 

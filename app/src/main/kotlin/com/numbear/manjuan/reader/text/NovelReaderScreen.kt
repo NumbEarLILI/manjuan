@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -398,10 +399,11 @@ private fun PlateImage(bytes: ByteArray, color: androidx.compose.ui.graphics.Col
     if (bitmap == null) {
         Text("彩页无法显示", color = color, modifier = modifier)
     } else {
+        val ratio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
         Image(
             bitmap.asImageBitmap(),
             contentDescription = "彩页",
-            modifier = modifier,
+            modifier = modifier.aspectRatio(ratio),
             contentScale = ContentScale.Fit,
         )
     }

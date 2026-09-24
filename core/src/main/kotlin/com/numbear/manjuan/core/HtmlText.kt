@@ -3,10 +3,11 @@ package com.numbear.manjuan.core
 object HtmlText {
     private val imageTag = Regex("(?is)<(img|image)\\b([^>]*)>")
     private val hrefAttr = Regex("(?i)\\b(?:src|href)\\s*=\\s*['\"]([^'\"]+)['\"]")
+    private val recindexAttr = Regex("""(?i)\brecindex\s*=\s*['"]?(\d+)""")
 
     sealed class Block {
         data class Text(val html: String) : Block()
-        data class Image(val href: String) : Block()
+        data class Image(val href: String, val recindex: Int = 0) : Block()
     }
 
     fun blocks(html: String): List<Block> {
@@ -16,12 +17,16 @@ object HtmlText {
             if (match.range.first > cursor) {
                 blocks += Block.Text(html.substring(cursor, match.range.first))
             }
-            val href = hrefAttr.find(match.groupValues[2])?.groupValues?.get(1)
+            val attrs = match.groupValues[2]
+            val href = hrefAttr.find(attrs)?.groupValues?.get(1)
                 ?.substringBefore('#')
                 ?.trim()
                 .orEmpty()
+            val recindex = recindexAttr.find(attrs)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             if (href.isNotEmpty() && !href.startsWith("data:", ignoreCase = true)) {
-                blocks += Block.Image(href)
+                blocks += Block.Image(href, recindex)
+            } else if (recindex > 0) {
+                blocks += Block.Image("", recindex)
             }
             cursor = match.range.last + 1
         }
