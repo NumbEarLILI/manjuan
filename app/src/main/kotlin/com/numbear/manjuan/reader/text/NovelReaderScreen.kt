@@ -310,6 +310,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         offset = offset.coerceIn(0, current.text.length),
                         anchor = anchor,
                         settings = settings,
+                        showProgress = chrome,
                         onPlace = { nextChapter, nextOffset ->
                             if (catchingUp) return@ScrollChapter
                             val clamped = nextChapter.coerceIn(0, novel.chapters.lastIndex)
@@ -499,6 +500,7 @@ private fun ScrollChapter(
     offset: Int,
     anchor: Int,
     settings: ReaderSettings,
+    showProgress: Boolean,
     onPlace: (chapter: Int, offset: Int) -> Unit,
     onToggleChrome: () -> Unit,
 ) {
@@ -592,11 +594,13 @@ private fun ScrollChapter(
                 }
             }
         }
-        val shown = scrollFraction(chapters, entries, listState)
-        LinearProgressIndicator(
-            progress = { shown },
-            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
-        )
+        if (showProgress) {
+            val shown = scrollFraction(chapters, entries, listState)
+            LinearProgressIndicator(
+                progress = { shown },
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+            )
+        }
     }
 }
 
