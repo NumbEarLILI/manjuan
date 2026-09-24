@@ -10,11 +10,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -29,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -46,7 +51,7 @@ import com.numbear.manjuan.core.LocatorCodec
 import com.numbear.manjuan.core.NovelChapter
 import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.NovelPages
-import com.numbear.manjuan.core.NovelSpan
+import com.numbear.manjuan.core.NovelScroll
 import com.numbear.manjuan.core.ReaderSettings
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
@@ -57,7 +62,9 @@ import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
 import com.numbear.manjuan.ui.inkColors
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
@@ -70,6 +77,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var download by remember { mutableStateOf<CacheProgress?>(null) }
     var chapter by remember { mutableIntStateOf(0) }
     var offset by remember { mutableIntStateOf(0) }
+    var anchor by remember { mutableIntStateOf(0) }
     var bookmarks by remember { mutableStateOf<List<BookmarkEntity>>(emptyList()) }
     var chrome by remember { mutableStateOf(true) }
     var showToc by remember { mutableStateOf(false) }
@@ -125,6 +133,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             if (target < next || index == chapters.lastIndex) {
                 chapter = index
                 offset = (target - consumed).coerceAtLeast(0)
+                anchor += 1
                 persist()
                 return
             }
@@ -140,6 +149,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             } else if (chapter > 0) {
                 chapter -= 1
                 offset = 0
+                anchor += 1
                 persist()
             }
         },
@@ -150,6 +160,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             } else if (chapter < chapters.lastIndex) {
                 chapter += 1
                 offset = 0
+                anchor += 1
                 persist()
             }
         },
@@ -189,6 +200,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                     ScrollChapter(
                         chapter = current,
                         offset = offset,
+                        anchor = anchor,
                         settings = settings,
                         onOffset = {
                             offset = it
@@ -239,6 +251,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             onOpen = {
                 chapter = LocatorCodec.chapter(it.locator)
                 offset = 0
+                anchor += 1
                 persist()
                 showToc = false
             },
@@ -252,6 +265,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             onOpen = {
                 chapter = LocatorCodec.chapter(it.locator)
                 offset = LocatorCodec.offset(it.locator)
+                anchor += 1
                 showBookmarks = false
             },
             onDelete = { mark ->
@@ -349,48 +363,113 @@ private fun PageTurn(
 private fun ScrollChapter(
     chapter: NovelChapter,
     offset: Int,
+    anchor: Int,
     settings: ReaderSettings,
     onOffset: (Int) -> Unit,
     onToggleChrome: () -> Unit,
 ) {
     val colors = settings.inkColors()
-    val scroll = rememberScrollState()
-    val spans = chapter.spans.ifEmpty { listOf(NovelSpan.Prose(chapter.text)) }
-    LaunchedEffect(chapter) {
-        val fraction = if (chapter.text.isEmpty()) 0f else offset.toFloat() / chapter.text.length
-        scroll.scrollTo((scroll.maxValue * fraction).toInt())
-    }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(scroll)
-            .pointerInput(Unit) { detectTapGestures { onToggleChrome() } }
-            .padding(settings.marginDp.dp),
-    ) {
-        spans.forEach { span ->
-            when (span) {
-                is NovelSpan.Prose -> Text(
-                    span.text,
-                    style = TextStyle(
-                        color = colors.foreground,
-                        fontSize = settings.fontSizeSp.sp,
-                        lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
-                        fontFamily = FontFamily.Serif,
-                    ),
-                )
-                is NovelSpan.Plate -> PlateImage(span.bytes, colors.foreground, Modifier.fillMaxWidth().padding(vertical = 12.dp))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val density = LocalDensity.current
+        val margin = settings.marginDp.dp
+        val fontPx = with(density) { settings.fontSizeSp.sp.toPx() }
+        val widthPx = with(density) { (maxWidth - margin * 2).toPx() }.coerceAtLeast(fontPx)
+        val charsPerLine = (widthPx / fontPx).toInt().coerceAtLeast(1)
+        val lineHeightPx = fontPx * settings.lineSpacing
+        val maxChars = remember(charsPerLine, lineHeightPx) {
+            NovelScroll.maxChars(charsPerLine, lineHeightPx)
+        }
+        val blocks = remember(chapter, maxChars) { NovelScroll.blocks(chapter, maxChars) }
+        val listState = rememberLazyListState()
+        var settling by remember { mutableStateOf(true) }
+        LaunchedEffect(anchor, blocks) {
+            settling = true
+            try {
+                if (blocks.isEmpty()) return@LaunchedEffect
+                val index = NovelScroll.indexAt(blocks, offset).coerceIn(0, blocks.lastIndex)
+                listState.scrollToItem(index)
+                val block = blocks[index]
+                if (block is NovelScroll.Block.Words && block.text.isNotEmpty()) {
+                    val size = withTimeoutOrNull(500) {
+                        snapshotFlow {
+                            listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+                        }.first { it > 0 }
+                    } ?: 0
+                    if (size > 0) {
+                        val fraction = (offset - block.start).coerceIn(0, block.text.length).toFloat() / block.text.length
+                        listState.scrollToItem(index, (fraction * size).toInt().coerceAtLeast(0))
+                    }
+                }
+            } finally {
+                settling = false
             }
         }
-    }
-    LaunchedEffect(scroll.value, scroll.maxValue, chapter) {
-        if (scroll.maxValue > 0 && chapter.text.isNotEmpty()) {
-            onOffset((scroll.value.toFloat() / scroll.maxValue * chapter.text.length).toInt())
+        LaunchedEffect(listState, blocks) {
+            snapshotFlow {
+                val index = listState.firstVisibleItemIndex
+                val pixel = listState.firstVisibleItemScrollOffset
+                val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+                Triple(index, pixel, size)
+            }.collect { (index, pixel, size) ->
+                if (settling || blocks.isEmpty() || chapter.text.isEmpty()) return@collect
+                val block = blocks.getOrNull(index) ?: return@collect
+                val within = if (block is NovelScroll.Block.Words && size > 0 && block.text.isNotEmpty()) {
+                    (block.text.length * (pixel.toFloat() / size)).toInt().coerceIn(0, block.text.length)
+                } else {
+                    0
+                }
+                onOffset((block.start + within).coerceIn(0, chapter.text.length))
+            }
         }
+        if (blocks.isEmpty()) {
+            Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
+        } else {
+            val style = TextStyle(
+                color = colors.foreground,
+                fontSize = settings.fontSizeSp.sp,
+                lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
+                fontFamily = FontFamily.Serif,
+            )
+            val plateCap = with(density) { NovelScroll.MaxBlockPx.toDp() }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(margin),
+            ) {
+                items(count = blocks.size, key = { it }) { index ->
+                    val tap = Modifier.fillMaxWidth().pointerInput(Unit) {
+                        detectTapGestures { onToggleChrome() }
+                    }
+                    when (val block = blocks[index]) {
+                        is NovelScroll.Block.Words -> Text(block.text, style = style, modifier = tap)
+                        is NovelScroll.Block.Picture -> PlateImage(
+                            block.bytes,
+                            colors.foreground,
+                            tap.heightIn(max = plateCap).padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            }
+        }
+        val shown = scrollFraction(blocks, listState, chapter.text.length)
+        LinearProgressIndicator(
+            progress = { shown },
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+        )
     }
-    LinearProgressIndicator(
-        progress = { if (scroll.maxValue == 0) 0f else scroll.value.toFloat() / scroll.maxValue },
-        modifier = Modifier.fillMaxWidth(),
-    )
+}
+
+private fun scrollFraction(blocks: List<NovelScroll.Block>, listState: LazyListState, textLength: Int): Float {
+    if (textLength <= 0 || blocks.isEmpty()) return 0f
+    val index = listState.firstVisibleItemIndex.coerceIn(0, blocks.lastIndex)
+    val block = blocks[index]
+    val size = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+    val within = if (block is NovelScroll.Block.Words && size > 0 && block.text.isNotEmpty()) {
+        (block.text.length * (listState.firstVisibleItemScrollOffset.toFloat() / size)).toInt()
+    } else {
+        0
+    }
+    return ((block.start + within).toFloat() / textLength).coerceIn(0f, 1f)
 }
 
 @Composable
