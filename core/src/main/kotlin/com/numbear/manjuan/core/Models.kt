@@ -53,7 +53,15 @@ data class NovelChapter(
     val spans: List<NovelSpan> = emptyList(),
 )
 
-data class NovelContent(val title: String, val author: String, val chapters: List<NovelChapter>)
+data class NovelContent(
+    val title: String,
+    val author: String,
+    val chapters: List<NovelChapter>,
+    /** Remote text that has not been downloaded through [totalBytes] yet. */
+    val more: Boolean = false,
+    val loadedBytes: Long = 0,
+    val totalBytes: Long = 0,
+)
 
 data class ReadingProgress(val locator: String, val percent: Float, val updatedAt: Long)
 

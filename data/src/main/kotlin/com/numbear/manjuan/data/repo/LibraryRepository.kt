@@ -16,9 +16,11 @@ import com.numbear.manjuan.core.FormatDetector
 import com.numbear.manjuan.core.ImageSniff
 import com.numbear.manjuan.core.LibraryNames
 import com.numbear.manjuan.core.MobiParser
+import com.numbear.manjuan.core.LocatorCodec
 import com.numbear.manjuan.core.NovelChapter
 import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.OkHttpWebDavClient
+import com.numbear.manjuan.core.RemoteText
 import com.numbear.manjuan.core.ProgressMerge
 import com.numbear.manjuan.core.ReadingProgress
 import com.numbear.manjuan.core.TextEncoding
@@ -46,6 +48,8 @@ import com.numbear.manjuan.data.db.SourceEntity
 import com.numbear.manjuan.data.open.BitmapIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InterruptedIOException
@@ -331,12 +335,13 @@ class LibraryRepository(
             val children = blockingWebDav { remote.list(book.remotePath.ifBlank { book.location }) }
             val images = children.filter { !it.directory && FormatDetector.isImageName(it.name.ifBlank { it.path }) }
             if (images.isEmpty()) throw UnsupportedBookException("远程文件夹里没有图片")
-            images.forEach { child ->
+            val imageDir = File(destDir, "images").apply { mkdirs() }
+            images.forEachIndexed { index, child ->
                 coroutineContext.ensureActive()
-                val fileName = WebDavBooks.displayFileName(child.name, child.path).ifBlank { "page" }
-                blockingWebDav { remote.download(child.path, File(destDir, fileName), onProgress) }
+                blockingWebDav { remote.download(child.path, File(imageDir, remoteImageName(index, child)), onProgress) }
             }
-            destDir.absolutePath
+            File(imageDir, PARTIAL_MARK).delete()
+            imageDir.absolutePath
         } else {
             val ext = FormatDetector.extension(remoteName).ifBlank { "bin" }
             val dest = File(destDir, safeName(book.title) + ".$ext")
@@ -394,7 +399,8 @@ class LibraryRepository(
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
             val source = database.sources().get(book.sourceId)
             if (source?.type == WEBDAV && !cacheReady(book)) {
-                cacheBook(book.id, onProgress)
+                val streamed = book.format == BookFormat.TXT.name || book.format == BookFormat.IMAGE_FOLDER.name
+                if (!streamed) cacheBook(book.id, onProgress)
             }
             val fresh = database.books().get(bookId) ?: book
             val resolved = WebDavBooks.resolve(
@@ -426,6 +432,18 @@ class LibraryRepository(
     suspend fun openNovel(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): NovelContent =
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
+            val source = database.sources().get(book.sourceId)
+            if (source?.type == WEBDAV && book.format == BookFormat.TXT.name && !cacheReady(book)) {
+                val saved = database.progress().get(book.id)
+                val content = remoteText(
+                    book,
+                    LocatorCodec.chapter(saved?.locator.orEmpty()),
+                    LocatorCodec.offset(saved?.locator.orEmpty()),
+                    onProgress,
+                )
+                rememberOpened(book, content.title, content.author, BookFormat.TXT.name, BookKind.NOVEL.name)
+                return@withContext content
+            }
             val file = ensureFile(book, onProgress)
             val resolved = WebDavBooks.resolve(
                 formatName = book.format,
@@ -471,6 +489,23 @@ class LibraryRepository(
             content
         }
 
+    suspend fun extendNovel(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): NovelContent =
+        withContext(Dispatchers.IO) {
+            val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
+            if (book.format != BookFormat.TXT.name || cacheReady(book)) return@withContext openNovel(bookId, onProgress)
+            val content = remoteGate(book.id).withLock { appendText(book, onProgress) }
+            rememberOpened(book, content.title, content.author, BookFormat.TXT.name, BookKind.NOVEL.name)
+            content
+        }
+
+    suspend fun extendPaged(bookId: Long, page: Int, onProgress: (Long, Long) -> Unit = { _, _ -> }): PagedContent =
+        withContext(Dispatchers.IO) {
+            val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
+            val source = database.sources().get(book.sourceId)
+            if (source?.type != WEBDAV || cacheReady(book)) return@withContext openPaged(bookId, onProgress)
+            openRemoteImages(book, page, onProgress)
+        }
+
     suspend fun openPaged(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): PagedContent =
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
@@ -506,6 +541,13 @@ class LibraryRepository(
                     PagedContent(book.title, format, pages, null, 0)
                 }
                 BookFormat.IMAGE_FOLDER -> {
+                    val source = database.sources().get(book.sourceId)
+                    if (source?.type == WEBDAV && !cacheReady(book)) {
+                        val saved = LocatorCodec.pageIndex(database.progress().get(book.id)?.locator.orEmpty())
+                        return@withContext openRemoteImages(book, saved, onProgress).also {
+                            database.books().update((database.books().get(book.id) ?: book).copy(lastOpenedAt = System.currentTimeMillis()))
+                        }
+                    }
                     val cached = sortedImages(File(book.cachedPath))
                     if (cached.isNotEmpty()) {
                         PagedContent(book.title, format, cached.map { PageRef.FilePage(it.absolutePath) }, null, 0)
@@ -847,7 +889,138 @@ class LibraryRepository(
     private fun cacheReady(book: BookEntity): Boolean {
         if (book.cachedPath.isBlank()) return false
         val file = File(book.cachedPath)
-        return file.isFile || (file.isDirectory && cachedImageCount(book) > 0)
+        if (file.isFile) return true
+        return file.isDirectory && cachedImageCount(book) > 0 && !File(file, PARTIAL_MARK).exists()
+    }
+
+    private val remoteGates = java.util.concurrent.ConcurrentHashMap<Long, Mutex>()
+
+    private fun remoteGate(bookId: Long): Mutex = remoteGates.getOrPut(bookId) { Mutex() }
+
+    private fun streamFile(bookId: Long) = File(context.filesDir, "cache-books/$bookId/stream.bin")
+
+    private suspend fun rememberOpened(book: BookEntity, title: String, author: String, format: String, kind: String) {
+        val stored = database.books().get(book.id) ?: book
+        database.books().update(
+            stored.copy(
+                title = title.ifBlank { stored.title },
+                author = author.ifBlank { stored.author },
+                format = format,
+                kind = kind,
+                lastOpenedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    private suspend fun remoteText(book: BookEntity, chapter: Int, offset: Int, onProgress: (Long, Long) -> Unit): NovelContent {
+        return remoteGate(book.id).withLock {
+            var content = appendText(book, onProgress)
+            var guard = 0
+            while (content.more && !RemoteText.covered(content.chapters, chapter, offset, complete = false) && guard < 4_000) {
+                guard++
+                val fresh = database.books().get(book.id) ?: book
+                content = appendText(fresh, onProgress)
+            }
+            content
+        }
+    }
+
+    private suspend fun appendText(book: BookEntity, onProgress: (Long, Long) -> Unit): NovelContent {
+        val file = streamFile(book.id)
+        file.parentFile?.mkdirs()
+        val loaded = if (file.isFile) file.length() else 0L
+        val known = book.sizeBytes
+        if (known > 0 && loaded >= known) {
+            finalizeText(book, file)
+            return RemoteText.novel(book.title, book.author, file.readBytes(), known)
+        }
+        currentCoroutineContext().ensureActive()
+        val remote = client(requireSource(book.sourceId))
+        val part = blockingWebDav {
+            remote.readRange(book.remotePath.ifBlank { book.location }, loaded, RemoteText.CHUNK_BYTES)
+        }
+        onProgress(loaded, if (part.total > 0) part.total else known)
+        if (part.bytes.isEmpty()) {
+            val total = if (part.total >= 0) part.total else loaded
+            val current = database.books().get(book.id) ?: book
+            database.books().update(current.copy(sizeBytes = total))
+            if (file.isFile) finalizeText(current, file)
+            val bytes = if (file.isFile) file.readBytes() else ByteArray(0)
+            return RemoteText.novel(book.title, book.author, bytes, total)
+        }
+        file.appendBytes(part.bytes)
+        val combinedSize = file.length()
+        val total = when {
+            part.total >= 0 -> part.total
+            part.bytes.size < RemoteText.CHUNK_BYTES -> combinedSize
+            else -> -1L
+        }
+        val current = database.books().get(book.id) ?: book
+        database.books().update(current.copy(sizeBytes = if (total > 0) total else current.sizeBytes))
+        onProgress(combinedSize, if (total > 0) total else -1L)
+        val done = total >= 0 && combinedSize >= total
+        if (done) finalizeText(database.books().get(book.id) ?: current, file)
+        return RemoteText.novel(book.title, book.author, file.readBytes(), if (done) combinedSize else total)
+    }
+
+    private suspend fun finalizeText(book: BookEntity, file: File) {
+        if (!file.isFile) return
+        val current = database.books().get(book.id) ?: book
+        database.books().update(current.copy(cachedPath = file.absolutePath, sizeBytes = file.length()))
+    }
+
+    private suspend fun openRemoteImages(book: BookEntity, page: Int, onProgress: (Long, Long) -> Unit): PagedContent {
+        return remoteGate(book.id).withLock {
+            val remote = client(requireSource(book.sourceId))
+            val images = blockingWebDav { remote.list(book.remotePath.ifBlank { book.location }) }
+                .filter { !it.directory && FormatDetector.isImageName(it.name.ifBlank { it.path }) }
+            if (images.isEmpty()) throw UnsupportedBookException("远程文件夹里没有图片")
+            val dir = File(context.filesDir, "cache-books/${book.id}/images").apply { mkdirs() }
+            val target = RemoteText.imageTarget(page, images.size)
+            var have = contiguousImages(dir, images.size)
+            while (have < target) {
+                currentCoroutineContext().ensureActive()
+                val child = images[have]
+                val dest = File(dir, remoteImageName(have, child))
+                if (!dest.isFile || dest.length() == 0L) {
+                    blockingWebDav { remote.download(child.path, dest, onProgress) }
+                }
+                have++
+                onProgress(have.toLong(), images.size.toLong())
+            }
+            val complete = have >= images.size
+            val marker = File(dir, PARTIAL_MARK)
+            if (complete) marker.delete() else marker.writeText("partial")
+            val current = database.books().get(book.id) ?: book
+            database.books().update(current.copy(cachedPath = dir.absolutePath))
+            val pages = (0 until have).map { index ->
+                PageRef.FilePage(File(dir, remoteImageName(index, images[index])).absolutePath)
+            }
+            PagedContent(
+                book.title,
+                BookFormat.IMAGE_FOLDER,
+                pages,
+                null,
+                0,
+                remotePageCount = if (complete) 0 else images.size,
+            )
+        }
+    }
+
+    private fun contiguousImages(dir: File, total: Int): Int {
+        var count = 0
+        while (count < total) {
+            val prefix = "%05d-".format(count + 1)
+            val found = dir.listFiles().orEmpty().any { it.isFile && it.name.startsWith(prefix) && it.length() > 0L }
+            if (!found) break
+            count++
+        }
+        return count
+    }
+
+    private fun remoteImageName(index: Int, entry: WebDavEntry): String {
+        val raw = WebDavBooks.displayFileName(entry.name, entry.path).ifBlank { "page" }
+        return "%05d-%s".format(index + 1, safeName(raw))
     }
 
     private fun sniffCached(book: BookEntity): ByteArray {
@@ -891,6 +1064,7 @@ class LibraryRepository(
     companion object {
         const val LOCAL = "LOCAL"
         const val WEBDAV = "WEBDAV"
+        const val PARTIAL_MARK = ".partial"
     }
 }
 
