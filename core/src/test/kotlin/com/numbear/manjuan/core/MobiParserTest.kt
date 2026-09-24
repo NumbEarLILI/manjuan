@@ -531,6 +531,59 @@ class MobiParserTest {
     }
 
     @Test
+    fun coverLabelAndKindleEmbedsOpenAsPicturePages() {
+        val png = tinyPng()
+        val gif = tinyGif()
+        val html = buildString {
+            append("<p>封面</p>")
+            listOf("0001", "0002", "0003").forEachIndexed { index, id ->
+                append("<p>第 ${index + 1} 頁</p><img src=\"kindle:embed:$id?mime=image/jpg\"/>")
+            }
+            append("<p>THE END</p>")
+            append("/*\n * Copyright (c) 2014-2024 VOLUME.HK\n */\n")
+            append("html{color:#000;background:#FFF;}\n")
+            append("div.fs {\nheight: 1680px;\nwidth: 1264px;\n}\n")
+        }.toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png, png, gif),
+            firstImage = 2,
+        )
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        assertEquals(listOf("png", "png", "gif"), opening.images.map { ImageSniff.extension(it) })
+        assertCleanRefusal(file, "不能当小说打开")
+        file.delete()
+    }
+
+    @Test
+    fun novelMobiShowsKindleEmbedImage() {
+        val png = tinyPng()
+        val html = "<p>第一章潮水很深，船还在江心。</p><img src=\"kindle:embed:0001?mime=image/jpg\"/>".toByteArray(Charsets.UTF_8)
+        val file = writeMobi(
+            compression = 1,
+            encoding = 65001,
+            records = listOf(html),
+            textLength = html.size,
+            extraFlags = null,
+            extraRecords = listOf(png),
+            firstImage = 2,
+        )
+        val chapter = MobiParser.parse(file).chapters.single()
+        val plates = chapter.spans.filterIsInstance<NovelSpan.Plate>()
+        assertEquals(1, plates.size)
+        assertTrue(plates.single().bytes.contentEquals(png))
+        val prose = chapter.spans.filterIsInstance<NovelSpan.Prose>().joinToString("") { it.text }
+        assertTrue(prose.contains("潮水"))
+        assertTrue(prose.contains("江心"))
+        file.delete()
+    }
+
+    @Test
     fun proseThatMentionsAPageNumberStaysANovel() {
         val png = tinyPng()
         val html = "<p>第一章潮水很深，船还在第 3 页的江心。</p><img recindex=\"00001\"/>".toByteArray(Charsets.UTF_8)

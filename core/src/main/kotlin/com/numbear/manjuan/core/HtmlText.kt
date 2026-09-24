@@ -56,7 +56,29 @@ object HtmlText {
         text = text.replace(Regex("[ \\t\\u3000]+"), " ")
         text = text.replace(Regex(" *\\n *"), "\n")
         text = text.replace(Regex("\\n{3,}"), "\n\n")
+        text = stripLooseCss(text)
         return text.trim()
+    }
+
+    private val cssLine = Regex(
+        """^(?:[.#]?[a-zA-Z_][\w.#\s,:>+-]*\{.*|[a-z][a-z0-9-]*\s*:\s*[^;]{0,80};?|[{}])$""",
+    )
+
+    /** Kindle fixed-layout books append the stylesheet as loose text after the last page. */
+    private fun stripLooseCss(text: String): String {
+        val noComments = text.replace(Regex("""(?s)/\*.*?\*/"""), "\n")
+        return noComments.lineSequence()
+            .filterNot { line ->
+                val trimmed = line.trim()
+                cssLine.matches(trimmed) || cssFragment(trimmed)
+            }
+            .joinToString("\n")
+    }
+
+    private fun cssFragment(line: String): Boolean {
+        if (line.isEmpty() || line.any { it.code > 127 }) return false
+        val mark = line.contains('{') || line.contains('%') || line.contains("px")
+        return mark && line.contains(':')
     }
 
     private fun unescape(value: String): String {

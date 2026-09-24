@@ -16,13 +16,26 @@ class SampleBookTest {
     fun sideStoryMobiImagePagesAreFiftyOneWithOneGif() {
         val file = File("/workspace/manjuan-testdata/无职转生-番外01-03.mobi")
         assumeTrue("样书不在本环境：${file.path}", file.isFile)
-        val pages = MobiParser.imagePages(file)
+        val opening = MobiParser.opening(file)
+        assertTrue(opening.pictureBook)
+        val pages = opening.images
         assertEquals(51, pages.size)
         assertEquals(50, pages.count { ImageSniff.extension(it) == "jpg" })
         assertEquals(1, pages.count { ImageSniff.extension(it) == "gif" })
-        pages.forEach { bytes ->
+        assertEquals("jpg", ImageSniff.extension(pages.first()))
+        assertEquals("gif", ImageSniff.extension(pages.last()))
+        pages.forEachIndexed { index, bytes ->
             val decoded = javax.imageio.ImageIO.read(bytes.inputStream())
-            assertTrue(decoded != null && decoded.width > 0 && decoded.height > 0)
+            assertTrue(
+                "第${index + 1}页 ${decoded?.width}x${decoded?.height}",
+                decoded != null && decoded.width >= 200 && decoded.height >= 200,
+            )
+        }
+        try {
+            MobiParser.parse(file)
+            throw AssertionError("图片书不应进入小说正文")
+        } catch (error: UnsupportedBookException) {
+            assertTrue(error.message.orEmpty().contains("不能当小说打开"))
         }
     }
 

@@ -112,6 +112,13 @@ class CoreLogicTest {
 
         val code = HtmlText.toPlain("<p>see #include &lt;mobi.h&gt; end</p>")
         assertTrue(code.contains("#include <mobi.h>"))
+        val css = HtmlText.toPlain("封面\n/*\n * Copyright (c) 2014-2024 VOLUME.HK\n */\nhtml{color:#000;}\ndiv.fs {\nheight: 1680px;\n}\nt op: 0.13%;\n潮水")
+        assertTrue(css.contains("封面"))
+        assertTrue(css.contains("潮水"))
+        assertTrue(!css.contains("1680px"))
+        assertTrue(!css.contains("html{"))
+        assertTrue(!css.contains("Copyright"))
+        assertTrue(!css.contains("0.13%"))
 
         val names = listOf("page10.jpg", "page2.jpg", "page1.jpg").sortedWith(NaturalSort)
         assertEquals(listOf("page1.jpg", "page2.jpg", "page10.jpg"), names)

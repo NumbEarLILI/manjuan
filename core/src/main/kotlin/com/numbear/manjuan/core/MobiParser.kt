@@ -326,16 +326,36 @@ object MobiParser {
 
     private fun readableScore(plain: String): Int = proseLetters(plain)
 
-    /** Page captions such as 第 138 頁 or 138页 are not prose. */
+    /** Page captions such as 第 138 頁 or 138页 are not prose. A lone 封面 is not either. */
     private val pageCaption = Regex("""(?i)(?:第\s*)?[0-9０-９]{1,6}\s*[頁页]|page\s*[0-9]{1,6}|[-—–]\s*[0-9０-９]{1,6}\s*[-—–]""")
+    private val coverLabel = Regex("""(?i)^(?:封面|book\s*cover|cover)$""")
+    private val endLabel = Regex("""(?i)^(?:the\s*end|完|終|结束|結束)$""")
+    private val kindleEmbed = Regex("""(?i)kindle:embed:([0-9A-V]+)""")
+    private const val KINDLE_BASE32 = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
 
     private fun proseLetters(plain: String): Int {
         if (plain.isBlank()) return 0
-        return pageCaption.replace(plain, "").count { it.isLetter() }
+        return plain.lineSequence().sumOf { line ->
+            val stripped = pageCaption.replace(line, "").trim()
+            if (stripped.isEmpty() || coverLabel.matches(stripped) || endLabel.matches(stripped)) 0 else stripped.count { it.isLetter() }
+        }
     }
 
     private fun isCaptionOnly(plain: String): Boolean =
         pageCaption.replace(plain, "").none { it.isLetter() }
+
+    /** KF8 `kindle:embed:001J` is a 1-based image index in base 32. */
+    private fun kindleEmbedIndex(href: String): Int {
+        val token = kindleEmbed.find(href)?.groupValues?.get(1) ?: return 0
+        var value = 0
+        for (ch in token) {
+            val digit = KINDLE_BASE32.indexOf(ch.uppercaseChar())
+            if (digit < 0) return 0
+            value = value * 32 + digit
+            if (value > 100_000) return 0
+        }
+        return value
+    }
 
     private data class Extracted(
         val plain: String,
@@ -371,7 +391,7 @@ object MobiParser {
                         if (kept.isNotEmpty()) spans += NovelSpan.Prose(kept)
                     }
                     is HtmlText.Block.Image -> {
-                        val index = block.recindex
+                        val index = if (block.recindex > 0) block.recindex else kindleEmbedIndex(block.href)
                         if (index in 1..images.size) spans += NovelSpan.Plate(images[index - 1])
                     }
                 }
