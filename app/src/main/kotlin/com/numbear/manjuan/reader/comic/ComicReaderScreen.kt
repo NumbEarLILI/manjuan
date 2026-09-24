@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -58,10 +59,13 @@ import com.numbear.manjuan.data.repo.PageRef
 import com.numbear.manjuan.data.repo.PagedContent
 import com.numbear.manjuan.reader.common.BindReadingChrome
 import com.numbear.manjuan.reader.common.ReaderLoading
+import com.numbear.manjuan.reader.common.SegmentLoading
+import com.numbear.manjuan.reader.common.detectReaderTap
 import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
 import com.numbear.manjuan.reader.common.ReaderTopBar
+import com.numbear.manjuan.ui.inkColors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -90,7 +94,8 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var catchingUp by remember { mutableStateOf(false) }
     var catchPage by remember { mutableIntStateOf(0) }
-    val scheme = MaterialTheme.colorScheme
+    var loadingMore by remember { mutableStateOf(false) }
+    val colors = settings.inkColors()
 
     LaunchedEffect(bookId) {
         loading = true
@@ -155,153 +160,184 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(scheme.background)) {
+    Box(Modifier.fillMaxSize().background(colors.background)) {
         when {
-            loading -> ReaderLoading(download, onBack, scheme.onBackground, Modifier.align(Alignment.Center).fillMaxWidth())
+            loading -> ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
-                Text(error!!, color = scheme.onBackground)
+                Text(error!!, color = colors.foreground)
                 TextButton(onClick = onBack) { Text("返回书架") }
             }
-            book != null && count == 0 -> Text("没有可显示的页面", Modifier.align(Alignment.Center), color = scheme.onBackground)
+            book != null && count == 0 -> Text("没有可显示的页面", Modifier.align(Alignment.Center), color = colors.foreground)
             book != null -> {
                 val safePage = page.coerceIn(0, count - 1)
                 val pageTotal = if (book.remotePageCount > count) book.remotePageCount else count
                 LaunchedEffect(safePage, count, book.remotePageCount) {
                     if (book.remotePageCount > count && safePage >= count - 2) {
+                        loadingMore = true
                         try {
                             content = app.library.extendPaged(bookId, safePage)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
+                        } finally {
+                            loadingMore = false
                         }
                     }
                 }
-                if (settings.comicDirection == "VERTICAL") {
-                    val listState = rememberLazyListState(initialFirstVisibleItemIndex = safePage)
-                    LaunchedEffect(listState) {
-                        snapshotFlow { listState.firstVisibleItemIndex }.collect { persist(it) }
-                    }
-                    BindReadingChrome(
-                        settings,
-                        onPrev = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
-                        onNext = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceAtMost(count - 1)) } },
-                    )
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                        items(count) { index ->
-                            // A zero-height placeholder makes the list compose every page and
-                            // download them. Keep an unloaded page one screen tall.
-                            var ready by remember(book, index) { mutableStateOf(false) }
-                            PageBitmap(
-                                app,
-                                bookId,
-                                book,
-                                index,
-                                modifier = if (ready) {
-                                    Modifier.fillParentMaxWidth()
-                                } else {
-                                    Modifier.fillParentMaxWidth().fillParentMaxHeight()
-                                },
-                            ) { bitmap ->
-                                SideEffect { ready = true }
-                                ZoomImage(bitmap, settings.fitMode, vertical = true)
-                            }
-                        }
-                    }
-                } else {
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        val dual = settings.dualPage && maxWidth > maxHeight
-                        val slots = if (dual) (count + 1) / 2 else count
-                        val initial = if (dual) safePage / 2 else safePage
-                        val pager = rememberPagerState(initialPage = initial.coerceIn(0, (slots - 1).coerceAtLeast(0)), pageCount = { slots })
-                        LaunchedEffect(pager.currentPage) {
-                            persist(if (dual) pager.currentPage * 2 else pager.currentPage)
-                        }
-                        BindReadingChrome(
-                            settings,
-                            onPrev = { scope.launch { pager.animateScrollToPage((pager.currentPage - 1).coerceAtLeast(0)) } },
-                            onNext = { scope.launch { pager.animateScrollToPage((pager.currentPage + 1).coerceAtMost(slots - 1)) } },
+                Column(Modifier.fillMaxSize()) {
+                    if (chrome) {
+                        ReaderTopBar(
+                            title = "${book.title}  ${safePage + 1}/$pageTotal",
+                            bookmarked = bookmarks.any { LocatorCodec.pageIndex(it.locator) == safePage },
+                            onBack = onBack,
+                            onBookmark = {
+                                scope.launch {
+                                    val locator = LocatorCodec.page(safePage)
+                                    val existing = bookmarks.find { it.locator == locator }
+                                    if (existing != null) app.library.deleteBookmark(existing.id)
+                                    else app.library.addBookmark(bookId, locator, "第 ${safePage + 1} 页")
+                                    bookmarks = app.library.bookmarks(bookId)
+                                }
+                            },
+                            onToc = { showMarks = true },
+                            container = colors.background,
+                            content = colors.foreground,
                         )
-                        HorizontalPager(
-                            state = pager,
-                            modifier = Modifier.fillMaxSize(),
-                            reverseLayout = settings.comicDirection == "RTL",
-                        ) { slot ->
-                            if (!dual) {
-                                PageBitmap(app, bookId, book, slot) { bitmap -> ZoomImage(bitmap, settings.fitMode, vertical = false) }
-                            } else {
-                                androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
-                                    val left = slot * 2
-                                    PageBitmap(app, bookId, book, left, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
-                                        ZoomImage(bitmap, "PAGE", vertical = false)
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .then(if (chrome) Modifier else Modifier.statusBarsPadding().navigationBarsPadding()),
+                    ) {
+                        if (settings.comicDirection == "VERTICAL") {
+                            val listState = rememberLazyListState(initialFirstVisibleItemIndex = safePage)
+                            LaunchedEffect(listState) {
+                                snapshotFlow { listState.firstVisibleItemIndex }.collect { persist(it) }
+                            }
+                            BindReadingChrome(
+                                settings,
+                                onPrev = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
+                                onNext = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceAtMost(count - 1)) } },
+                            )
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize().pointerInput(chrome) {
+                                    detectReaderTap { chrome = !chrome }
+                                },
+                            ) {
+                                items(count) { index ->
+                                    // A zero-height placeholder makes the list compose every page and
+                                    // download them. Keep an unloaded page one screen tall.
+                                    var ready by remember(book, index) { mutableStateOf(false) }
+                                    PageBitmap(
+                                        app,
+                                        bookId,
+                                        book,
+                                        index,
+                                        modifier = if (ready) {
+                                            Modifier.fillParentMaxWidth()
+                                        } else {
+                                            Modifier.fillParentMaxWidth().fillParentMaxHeight()
+                                        },
+                                    ) { bitmap ->
+                                        SideEffect { ready = true }
+                                        ZoomImage(bitmap, settings.fitMode, vertical = true)
                                     }
-                                    if (left + 1 < count) {
-                                        PageBitmap(app, bookId, book, left + 1, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
-                                            ZoomImage(bitmap, "PAGE", vertical = false)
+                                }
+                            }
+                        } else {
+                            BoxWithConstraints(Modifier.fillMaxSize()) {
+                                val dual = settings.dualPage && maxWidth > maxHeight
+                                val slots = if (dual) (count + 1) / 2 else count
+                                val initial = if (dual) safePage / 2 else safePage
+                                val pager = rememberPagerState(initialPage = initial.coerceIn(0, (slots - 1).coerceAtLeast(0)), pageCount = { slots })
+                                LaunchedEffect(pager.currentPage) {
+                                    persist(if (dual) pager.currentPage * 2 else pager.currentPage)
+                                }
+                                BindReadingChrome(
+                                    settings,
+                                    onPrev = { scope.launch { pager.animateScrollToPage((pager.currentPage - 1).coerceAtLeast(0)) } },
+                                    onNext = { scope.launch { pager.animateScrollToPage((pager.currentPage + 1).coerceAtMost(slots - 1)) } },
+                                )
+                                HorizontalPager(
+                                    state = pager,
+                                    modifier = Modifier.fillMaxSize(),
+                                    reverseLayout = settings.comicDirection == "RTL",
+                                ) { slot ->
+                                    if (!dual) {
+                                        PageBitmap(app, bookId, book, slot) { bitmap -> ZoomImage(bitmap, settings.fitMode, vertical = false) }
+                                    } else {
+                                        androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
+                                            val left = slot * 2
+                                            PageBitmap(app, bookId, book, left, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                                ZoomImage(bitmap, "PAGE", vertical = false)
+                                            }
+                                            if (left + 1 < count) {
+                                                PageBitmap(app, bookId, book, left + 1, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                                    ZoomImage(bitmap, "PAGE", vertical = false)
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                                Box(
+                                    Modifier.fillMaxSize().pointerInput(pager, slots) {
+                                        detectTapGestures { tap ->
+                                            val zone = tap.x / size.width
+                                            val forward = zone > 0.72f
+                                            val back = zone < 0.28f
+                                            val rtl = settings.comicDirection == "RTL"
+                                            val goNext = if (rtl) back else forward
+                                            val goPrev = if (rtl) forward else back
+                                            when {
+                                                goPrev -> scope.launch { pager.animateScrollToPage((pager.currentPage - 1).coerceAtLeast(0)) }
+                                                goNext -> scope.launch { pager.animateScrollToPage((pager.currentPage + 1).coerceAtMost(slots - 1)) }
+                                                else -> chrome = !chrome
+                                            }
+                                        }
+                                    },
+                                )
                             }
                         }
-                        Box(
-                            Modifier.fillMaxSize().pointerInput(pager, slots) {
-                                detectTapGestures { tap ->
-                                    val zone = tap.x / size.width
-                                    val forward = zone > 0.72f
-                                    val back = zone < 0.28f
-                                    val rtl = settings.comicDirection == "RTL"
-                                    val goNext = if (rtl) back else forward
-                                    val goPrev = if (rtl) forward else back
-                                    when {
-                                        goPrev -> scope.launch { pager.animateScrollToPage((pager.currentPage - 1).coerceAtLeast(0)) }
-                                        goNext -> scope.launch { pager.animateScrollToPage((pager.currentPage + 1).coerceAtMost(slots - 1)) }
-                                        else -> chrome = !chrome
-                                    }
-                                }
-                            },
-                        )
+                        if (loadingMore || catchingUp) {
+                            SegmentLoading(
+                                message = if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
+                                color = colors.foreground,
+                                container = colors.background,
+                                modifier = Modifier.align(Alignment.Center),
+                            )
+                        }
                     }
-                }
-                if (chrome) {
-                    ReaderTopBar(
-                        title = "${book.title}  ${safePage + 1}/$pageTotal",
-                        bookmarked = bookmarks.any { LocatorCodec.pageIndex(it.locator) == safePage },
-                        onBack = onBack,
-                        onBookmark = {
-                            scope.launch {
-                                val locator = LocatorCodec.page(safePage)
-                                val existing = bookmarks.find { it.locator == locator }
-                                if (existing != null) app.library.deleteBookmark(existing.id)
-                                else app.library.addBookmark(bookId, locator, "第 ${safePage + 1} 页")
-                                bookmarks = app.library.bookmarks(bookId)
-                            }
-                        },
-                        onToc = { showMarks = true },
-                        container = scheme.surface,
-                        content = scheme.onSurface,
-                    )
-                    Column(
-                        Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .background(scheme.surface.copy(alpha = 0.94f))
-                            .navigationBarsPadding()
-                            .padding(12.dp),
-                    ) {
-                        PercentSlider(
-                            percent = if (pageTotal <= 1) 0f else safePage.toFloat() / (pageTotal - 1),
-                            labelColor = scheme.onSurface,
-                        ) { value ->
-                            val target = (value * (pageTotal - 1)).toInt().coerceIn(0, pageTotal - 1)
-                            if (target >= count && book.remotePageCount > count) {
-                                scope.launch {
-                                    runCatching { content = app.library.extendPaged(bookId, target) }
-                                    persist(target.coerceAtMost((content?.pages?.size ?: count) - 1))
+                    if (chrome) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(colors.background.copy(alpha = 0.94f))
+                                .navigationBarsPadding()
+                                .padding(12.dp),
+                        ) {
+                            PercentSlider(
+                                percent = if (pageTotal <= 1) 0f else safePage.toFloat() / (pageTotal - 1),
+                                labelColor = colors.foreground,
+                            ) { value ->
+                                val target = (value * (pageTotal - 1)).toInt().coerceIn(0, pageTotal - 1)
+                                if (target >= count && book.remotePageCount > count) {
+                                    scope.launch {
+                                        loadingMore = true
+                                        try {
+                                            runCatching { content = app.library.extendPaged(bookId, target) }
+                                            persist(target.coerceAtMost((content?.pages?.size ?: count) - 1))
+                                        } finally {
+                                            loadingMore = false
+                                        }
+                                    }
+                                } else {
+                                    persist(target.coerceAtMost(count - 1))
                                 }
-                            } else {
-                                persist(target.coerceAtMost(count - 1))
                             }
+                            TextButton(onClick = { showSettings = true }) { Text("阅读", color = colors.foreground) }
                         }
-                        TextButton(onClick = { showSettings = true }) { Text("阅读", color = scheme.onSurface) }
                     }
                 }
             }

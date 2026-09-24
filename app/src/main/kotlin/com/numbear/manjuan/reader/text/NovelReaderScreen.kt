@@ -3,8 +3,6 @@ package com.numbear.manjuan.reader.text
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -41,8 +39,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -63,6 +59,8 @@ import com.numbear.manjuan.core.RemoteText
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
 import com.numbear.manjuan.reader.common.ReaderLoading
+import com.numbear.manjuan.reader.common.SegmentLoading
+import com.numbear.manjuan.reader.common.detectReaderTap
 import com.numbear.manjuan.progress.BookmarkSheet
 import com.numbear.manjuan.progress.PercentSlider
 import com.numbear.manjuan.reader.common.ReaderSettingsSheet
@@ -224,12 +222,19 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             val targetBytes = (targetPercent.coerceIn(0f, 1f) * current.totalBytes).toLong()
             if (targetBytes > current.loadedBytes) {
                 scope.launch {
-                    var latest = current
-                    while (latest.more && latest.loadedBytes < targetBytes) {
-                        latest = app.library.extendNovel(bookId)
-                        content = latest
+                    loadingMore = true
+                    try {
+                        var latest = current
+                        while (latest.more && latest.loadedBytes < targetBytes) {
+                            latest = app.library.extendNovel(bookId)
+                            content = latest
+                        }
+                        place(targetBytes.toFloat() / latest.loadedBytes.coerceAtLeast(1), latest)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } finally {
+                        loadingMore = false
                     }
-                    place(targetBytes.toFloat() / latest.loadedBytes.coerceAtLeast(1), latest)
                 }
                 return
             }
@@ -360,10 +365,11 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                 }
                 if (loadingMore || catchingUp) {
-                    Text(
-                        if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                    SegmentLoading(
+                        message = if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
                         color = colors.foreground,
+                        container = colors.background,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
                     )
                 }
                 }
@@ -611,28 +617,6 @@ private fun ScrollChapter(
                 progress = { shown },
                 modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
             )
-        }
-    }
-}
-
-/**
- * Tap toggles chrome. The listener stays on the reader container, not on each lazy row:
- * a row's pointer coroutine is cancelled when that row scrolls away and that cancellation
- * was leaving the list unable to scroll further.
- */
-private suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        val start = down.position
-        var moved = false
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val change = event.changes.firstOrNull() ?: return@awaitEachGesture
-            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
-            if (!change.pressed) {
-                if (!moved) onTap()
-                return@awaitEachGesture
-            }
         }
     }
 }

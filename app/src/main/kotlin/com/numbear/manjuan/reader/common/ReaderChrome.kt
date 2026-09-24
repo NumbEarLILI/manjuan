@@ -2,13 +2,17 @@ package com.numbear.manjuan.reader.common
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.rememberScrollState
@@ -35,6 +39,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.LocalRegisterVolumeKey
@@ -96,6 +102,42 @@ fun ReaderLoading(download: CacheProgress?, onCancel: () -> Unit, color: Color, 
             Text("已接收 ${download.read / 1024} KB", color = color, modifier = Modifier.padding(top = 8.dp))
         }
         TextButton(onClick = onCancel) { Text("取消") }
+    }
+}
+
+/** Spinner shown while the next slice of a book is fetched, without covering the page already open. */
+@Composable
+fun SegmentLoading(message: String, color: Color, container: Color, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .background(container.copy(alpha = 0.94f), RoundedCornerShape(24.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(22.dp), color = color, strokeWidth = 2.dp)
+        Text(message, color = color)
+    }
+}
+
+/**
+ * Tap toggles chrome. A drag is left for the scroller. The listener stays on the reader
+ * container: a row's pointer coroutine is cancelled when that row scrolls away.
+ */
+suspend fun PointerInputScope.detectReaderTap(onTap: () -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val start = down.position
+        var moved = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull() ?: return@awaitEachGesture
+            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (!change.pressed) {
+                if (!moved) onTap()
+                return@awaitEachGesture
+            }
+        }
     }
 }
 
@@ -210,6 +252,16 @@ fun ReaderSettingsSheet(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("阅读时保持屏幕常亮", modifier = Modifier.weight(1f))
                 Switch(settings.keepScreenOn, { onChange(settings.copy(keepScreenOn = it)) })
+            }
+            Text("屏幕方向")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("FOLLOW" to "跟随系统", "PORTRAIT" to "锁定竖屏", "LANDSCAPE" to "锁定横屏").forEach { (value, label) ->
+                    FilterChip(
+                        selected = settings.orientation == value,
+                        onClick = { onChange(settings.copy(orientation = value)) },
+                        label = { Text(label) },
+                    )
+                }
             }
         }
     }
