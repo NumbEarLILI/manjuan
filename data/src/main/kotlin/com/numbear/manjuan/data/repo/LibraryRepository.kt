@@ -346,6 +346,9 @@ class LibraryRepository(
             val ext = FormatDetector.extension(remoteName).ifBlank { "bin" }
             val dest = File(destDir, safeName(book.title) + ".$ext")
             blockingWebDav { remote.download(book.remotePath.ifBlank { book.location }, dest, onProgress) }
+            destDir.listFiles()?.forEach { child ->
+                if (child.absolutePath != dest.absolutePath) child.deleteRecursively()
+            }
             dest.absolutePath
         }
         database.books().update(book.copy(cachedPath = cached, sizeBytes = File(cached).let { if (it.isFile) it.length() else book.sizeBytes }))
@@ -398,9 +401,8 @@ class LibraryRepository(
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
             val source = database.sources().get(book.sourceId)
-            if (source?.type == WEBDAV && !cacheReady(book)) {
-                val streamed = book.format == BookFormat.TXT.name || book.format == BookFormat.IMAGE_FOLDER.name
-                if (!streamed) cacheBook(book.id, onProgress)
+            if (source?.type == WEBDAV && !cacheReady(book) && !streamsWithoutWholeFile(book.format)) {
+                cacheBook(book.id, onProgress)
             }
             val fresh = database.books().get(bookId) ?: book
             val resolved = WebDavBooks.resolve(
@@ -414,13 +416,18 @@ class LibraryRepository(
             )
             var kind = resolved.format.kind() ?: throw UnsupportedBookException("无法打开这种书")
             if (resolved.format == BookFormat.MOBI || resolved.format == BookFormat.AZW3) {
-                val file = ensureFile(fresh, onProgress)
-                val opening = MobiParser.opening(file)
-                if (opening.pictureBook) {
-                    if (opening.images.isEmpty()) {
-                        throw UnsupportedBookException("这本 MOBI 是图片书，但没有可显示的图片")
+                val remoteSource = database.sources().get(fresh.sourceId)
+                if (remoteSource?.type == WEBDAV && !cacheReady(fresh)) {
+                    if (mobiIsComic(fresh, onProgress)) kind = BookKind.COMIC
+                } else {
+                    val file = ensureFile(fresh, onProgress)
+                    val opening = MobiParser.opening(file)
+                    if (opening.pictureBook) {
+                        if (opening.images.isEmpty()) {
+                            throw UnsupportedBookException("这本 MOBI 是图片书，但没有可显示的图片")
+                        }
+                        kind = BookKind.COMIC
                     }
-                    kind = BookKind.COMIC
                 }
             }
             if (fresh.format != resolved.format.name || fresh.kind != kind.name) {
@@ -433,6 +440,30 @@ class LibraryRepository(
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
             val source = database.sources().get(book.sourceId)
+            if (source?.type == WEBDAV && !cacheReady(book) && book.format == BookFormat.EPUB.name) {
+                val saved = database.progress().get(book.id)
+                val content = openPartialEpub(
+                    book,
+                    LocatorCodec.chapter(saved?.locator.orEmpty()),
+                    LocatorCodec.offset(saved?.locator.orEmpty()),
+                    onProgress,
+                )
+                rememberOpened(book, content.title, content.author, BookFormat.EPUB.name, BookKind.NOVEL.name)
+                return@withContext content
+            }
+            if (source?.type == WEBDAV && !cacheReady(book) &&
+                (book.format == BookFormat.MOBI.name || book.format == BookFormat.AZW3.name)
+            ) {
+                val saved = database.progress().get(book.id)
+                val content = openPartialMobi(
+                    book,
+                    LocatorCodec.chapter(saved?.locator.orEmpty()),
+                    LocatorCodec.offset(saved?.locator.orEmpty()),
+                    onProgress,
+                )
+                rememberOpened(book, content.title, content.author, book.format, BookKind.NOVEL.name)
+                return@withContext content
+            }
             if (source?.type == WEBDAV && book.format == BookFormat.TXT.name && !cacheReady(book)) {
                 val saved = database.progress().get(book.id)
                 val content = remoteText(
@@ -492,7 +523,14 @@ class LibraryRepository(
     suspend fun extendNovel(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): NovelContent =
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
-            if (book.format != BookFormat.TXT.name || cacheReady(book)) return@withContext openNovel(bookId, onProgress)
+            if (cacheReady(book)) return@withContext openNovel(bookId, onProgress)
+            if (book.format == BookFormat.EPUB.name) {
+                return@withContext remoteGate(book.id).withLock { growEpub(book, onProgress) }
+            }
+            if (book.format == BookFormat.MOBI.name || book.format == BookFormat.AZW3.name) {
+                return@withContext remoteGate(book.id).withLock { growMobi(book, onProgress) }
+            }
+            if (book.format != BookFormat.TXT.name) return@withContext openNovel(bookId, onProgress)
             val content = remoteGate(book.id).withLock { appendText(book, onProgress) }
             rememberOpened(book, content.title, content.author, BookFormat.TXT.name, BookKind.NOVEL.name)
             content
@@ -503,12 +541,28 @@ class LibraryRepository(
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
             val source = database.sources().get(book.sourceId)
             if (source?.type != WEBDAV || cacheReady(book)) return@withContext openPaged(bookId, onProgress)
-            openRemoteImages(book, page, onProgress)
+            when (book.format) {
+                BookFormat.CBZ.name, BookFormat.ZIP_IMAGES.name -> openPartialCbz(book, page, onProgress)
+                BookFormat.CBR.name -> openPartialCbr(book, page, onProgress)
+                BookFormat.PDF.name -> openPartialPdf(book, page, onProgress)
+                BookFormat.MOBI.name, BookFormat.AZW3.name -> openPartialMobiComic(book, page, onProgress)
+                else -> openRemoteImages(book, page, onProgress)
+            }
         }
 
     suspend fun openPaged(bookId: Long, onProgress: (Long, Long) -> Unit = { _, _ -> }): PagedContent =
         withContext(Dispatchers.IO) {
             val book = database.books().get(bookId) ?: throw UnsupportedBookException("找不到这本书")
+            val source = database.sources().get(book.sourceId)
+            if (source?.type == WEBDAV && !cacheReady(book)) {
+                when (book.format) {
+                    BookFormat.IMAGE_FOLDER.name -> return@withContext openRemoteImages(book, page = 0, onProgress)
+                    BookFormat.CBZ.name, BookFormat.ZIP_IMAGES.name -> return@withContext openPartialCbz(book, 0, onProgress)
+                    BookFormat.CBR.name -> return@withContext openPartialCbr(book, 0, onProgress)
+                    BookFormat.PDF.name -> return@withContext openPartialPdf(book, 0, onProgress)
+                    BookFormat.MOBI.name, BookFormat.AZW3.name -> return@withContext openPartialMobiComic(book, 0, onProgress)
+                }
+            }
             val format = runCatching { BookFormat.valueOf(book.format) }.getOrDefault(BookFormat.UNSUPPORTED)
             val content = when (format) {
                 BookFormat.PDF -> {
@@ -1063,6 +1117,161 @@ class LibraryRepository(
         name.replace(Regex("""[\\/:*?"<>|]"""), "_").take(80).ifBlank { "book" }
 
     private fun ProgressEntity.toReading() = ReadingProgress(locator, percent, updatedAt)
+
+    suspend fun ensureRemotePage(bookId: Long, page: Int) = withContext(Dispatchers.IO) {
+        val book = database.books().get(bookId) ?: return@withContext
+        val source = database.sources().get(book.sourceId)
+        if (source?.type != WEBDAV || cacheReady(book) || book.format != BookFormat.PDF.name) return@withContext
+        remoteGate(book.id).withLock {
+            val size = remoteSize(book)
+            partial(book) { _, _ -> }.ensurePdf(size, page)
+        }
+    }
+
+    private fun streamsWithoutWholeFile(format: String): Boolean = format in setOf(
+        BookFormat.TXT.name,
+        BookFormat.EPUB.name,
+        BookFormat.MOBI.name,
+        BookFormat.AZW3.name,
+        BookFormat.PDF.name,
+        BookFormat.CBZ.name,
+        BookFormat.CBR.name,
+        BookFormat.ZIP_IMAGES.name,
+        BookFormat.IMAGE_FOLDER.name,
+    )
+
+    private suspend fun remoteSize(book: BookEntity): Long {
+        if (book.sizeBytes > 0) return book.sizeBytes
+        val source = requireSource(book.sourceId)
+        val remote = client(source)
+        val path = book.remotePath.ifBlank { book.location }
+        val probe = blockingWebDav { remote.readRange(path, 0, 1) }
+        if (probe.total <= 0) throw UnsupportedBookException("无法获取文件大小")
+        val current = database.books().get(book.id) ?: book
+        database.books().update(current.copy(sizeBytes = probe.total))
+        return probe.total
+    }
+
+    private suspend fun partial(book: BookEntity, onProgress: (Long, Long) -> Unit): PartialRemote {
+        val remote = client(requireSource(book.sourceId))
+        val path = book.remotePath.ifBlank { book.location }
+        var read = 0L
+        return PartialRemote(File(context.filesDir, "${BookCache.DIR}/${book.id}")) { start, length ->
+            if (length <= 0) return@PartialRemote ByteArray(0)
+            if (Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
+            val out = ByteArray(length)
+            var offset = 0
+            while (offset < length) {
+                if (Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
+                val count = minOf(256 * 1024, length - offset)
+                val part = remote.readRange(path, start + offset, count)
+                if (part.bytes.isEmpty()) break
+                val copied = minOf(part.bytes.size, length - offset)
+                part.bytes.copyInto(out, offset, 0, copied)
+                offset += copied
+                read += copied
+                onProgress(read, -1L)
+                if (copied < count) break
+            }
+            if (offset == length) out else out.copyOf(offset)
+        }
+    }
+
+    private suspend fun mobiIsComic(book: BookEntity, onProgress: (Long, Long) -> Unit): Boolean {
+        val size = remoteSize(book)
+        return partial(book, onProgress).mobiIsComic(size)
+    }
+
+    private suspend fun openPartialEpub(book: BookEntity, chapter: Int, offset: Int, onProgress: (Long, Long) -> Unit): NovelContent {
+        val size = remoteSize(book)
+        val reader = partial(book, onProgress)
+        val stored = countFile(book.id, "spine.txt")
+        if (stored > 0) {
+            val existing = reader.epub(size, book.title, stored)
+            if (!existing.more || RemoteText.covered(existing.chapters, chapter, offset, complete = false)) return existing
+        }
+        return growEpub(book, onProgress)
+    }
+
+    private suspend fun growEpub(book: BookEntity, onProgress: (Long, Long) -> Unit): NovelContent {
+        val size = remoteSize(book)
+        val reader = partial(book, onProgress)
+        val stored = countFile(book.id, "spine.txt")
+        val before = if (stored > 0) reader.epub(size, book.title, stored).chapters.size else 0
+        var limit = stored
+        var parsed = reader.epub(size, book.title, limit.coerceAtLeast(1))
+        var guard = 0
+        while (parsed.more && parsed.chapters.size <= before && guard < 8) {
+            limit++
+            parsed = reader.epub(size, book.title, limit)
+            guard++
+        }
+        writeCount(book.id, "spine.txt", limit.coerceAtLeast(1))
+        rememberOpened(book, parsed.title, parsed.author, BookFormat.EPUB.name, BookKind.NOVEL.name)
+        return parsed
+    }
+
+    private suspend fun openPartialMobi(book: BookEntity, chapter: Int, offset: Int, onProgress: (Long, Long) -> Unit): NovelContent {
+        val size = remoteSize(book)
+        val reader = partial(book, onProgress)
+        val stored = countFile(book.id, "mobi-text.txt")
+        if (stored > 0) {
+            val existing = reader.mobiNovel(size, book.title, stored, advance = false)
+            if (!existing.more || RemoteText.covered(existing.chapters, chapter, offset, complete = false)) return existing
+        }
+        return growMobi(book, onProgress)
+    }
+
+    private suspend fun growMobi(book: BookEntity, onProgress: (Long, Long) -> Unit): NovelContent {
+        val size = remoteSize(book)
+        val reader = partial(book, onProgress)
+        val stored = countFile(book.id, "mobi-text.txt")
+        val parsed = reader.mobiNovel(size, book.title, stored, advance = true)
+        rememberOpened(book, parsed.title, parsed.author, book.format, BookKind.NOVEL.name)
+        return parsed
+    }
+
+    private suspend fun openPartialCbz(book: BookEntity, page: Int, onProgress: (Long, Long) -> Unit): PagedContent {
+        val format = runCatching { BookFormat.valueOf(book.format) }.getOrDefault(BookFormat.CBZ)
+        val content = partial(book, onProgress).cbz(remoteSize(book), book.title, format, page)
+        touchOpened(book)
+        return content
+    }
+
+    private suspend fun openPartialCbr(book: BookEntity, page: Int, onProgress: (Long, Long) -> Unit): PagedContent {
+        val content = partial(book, onProgress).cbr(remoteSize(book), book.title, page)
+        touchOpened(book)
+        return content
+    }
+
+    private suspend fun openPartialPdf(book: BookEntity, page: Int, onProgress: (Long, Long) -> Unit): PagedContent {
+        val saved = database.progress().get(book.id)
+        val index = if (page > 0) page else LocatorCodec.pageIndex(saved?.locator.orEmpty())
+        val content = partial(book, onProgress).pdf(remoteSize(book), book.title, index)
+        touchOpened(book)
+        return content
+    }
+
+    private suspend fun openPartialMobiComic(book: BookEntity, page: Int, onProgress: (Long, Long) -> Unit): PagedContent {
+        val format = runCatching { BookFormat.valueOf(book.format) }.getOrDefault(BookFormat.MOBI)
+        val content = partial(book, onProgress).mobiComic(remoteSize(book), book.title, format, page)
+        touchOpened(book)
+        return content
+    }
+
+    private suspend fun touchOpened(book: BookEntity) {
+        val stored = database.books().get(book.id) ?: book
+        database.books().update(stored.copy(lastOpenedAt = System.currentTimeMillis()))
+    }
+
+    private fun countFile(bookId: Long, name: String): Int =
+        File(context.filesDir, "${BookCache.DIR}/$bookId/$name").takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull() ?: 0
+
+    private fun writeCount(bookId: Long, name: String, value: Int) {
+        val file = File(context.filesDir, "${BookCache.DIR}/$bookId/$name")
+        file.parentFile?.mkdirs()
+        file.writeText(value.toString())
+    }
 
     companion object {
         const val LOCAL = "LOCAL"

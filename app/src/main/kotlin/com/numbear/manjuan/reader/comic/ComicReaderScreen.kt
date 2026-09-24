@@ -185,7 +185,7 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                     )
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(count) { index ->
-                            PageBitmap(book, index) { bitmap ->
+                            PageBitmap(app, bookId, book, index) { bitmap ->
                                 ZoomImage(bitmap, settings.fitMode, vertical = true)
                             }
                         }
@@ -210,15 +210,15 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                             reverseLayout = settings.comicDirection == "RTL",
                         ) { slot ->
                             if (!dual) {
-                                PageBitmap(book, slot) { bitmap -> ZoomImage(bitmap, settings.fitMode, vertical = false) }
+                                PageBitmap(app, bookId, book, slot) { bitmap -> ZoomImage(bitmap, settings.fitMode, vertical = false) }
                             } else {
                                 androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
                                     val left = slot * 2
-                                    PageBitmap(book, left, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                    PageBitmap(app, bookId, book, left, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
                                         ZoomImage(bitmap, "PAGE", vertical = false)
                                     }
                                     if (left + 1 < count) {
-                                        PageBitmap(book, left + 1, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                        PageBitmap(app, bookId, book, left + 1, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
                                             ZoomImage(bitmap, "PAGE", vertical = false)
                                         }
                                     }
@@ -319,6 +319,8 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
 
 @Composable
 private fun PageBitmap(
+    app: ManjuanApp,
+    bookId: Long,
     content: PagedContent,
     index: Int,
     modifier: Modifier = Modifier.fillMaxWidth(),
@@ -332,6 +334,7 @@ private fun PageBitmap(
             bitmap = withContext(Dispatchers.IO) {
                 val pdf = content.pdfFile
                 if (pdf != null) {
+                    app.library.ensureRemotePage(bookId, index)
                     BitmapIO.renderPdf(pdf, index, 1600)
                 } else {
                     when (val page = content.pages[index]) {

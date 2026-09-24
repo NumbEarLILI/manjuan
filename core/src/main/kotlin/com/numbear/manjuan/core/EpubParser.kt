@@ -11,60 +11,74 @@ import javax.xml.parsers.ParserConfigurationException
 object EpubParser {
     fun parse(file: File): NovelContent {
         ZipFile(file, Charsets.UTF_8).use { zip ->
-            val container = zip.readText("META-INF/container.xml")
-                ?: throw UnsupportedBookException("EPUB 缺少 META-INF/container.xml")
-            val opfPath = Regex("""full-path\s*=\s*"([^"]+)"""")
-                .find(container)?.groupValues?.get(1)?.substringBefore('#')
-                ?: throw UnsupportedBookException("EPUB 没有 OPF 路径")
-            val opfBytes = zip.readBytes(opfPath) ?: throw UnsupportedBookException("EPUB 缺少 OPF：$opfPath")
-            val opf = decodeXml(opfBytes)
-            val doc = parseXml(opf)
-            val elements = doc.documentElement.descendants()
-            val title = elements.firstText("title").ifBlank { file.nameWithoutExtension }
-            val author = elements.firstText("creator")
-            val manifest = elements.filter { it.localName == "item" }.associate { item ->
-                item.attr("id") to ManifestItem(
-                    href = item.attr("href"),
-                    mediaType = item.attr("media-type"),
-                )
+            return parse({ path -> zip.readBytes(path) }, file.nameWithoutExtension, Int.MAX_VALUE)
+        }
+    }
+
+    /**
+     * [maxSpineHtml] stops after that many HTML spine items. Later chapters stay
+     * unread so a remote EPUB can open from the first chapter alone.
+     */
+    fun parse(read: (String) -> ByteArray?, fallbackTitle: String, maxSpineHtml: Int): NovelContent {
+        val container = read("META-INF/container.xml")?.let(::decodeXml)
+            ?: throw UnsupportedBookException("EPUB 缺少 META-INF/container.xml")
+        val opfPath = Regex("""full-path\s*=\s*"([^"]+)"""")
+            .find(container)?.groupValues?.get(1)?.substringBefore('#')
+            ?: throw UnsupportedBookException("EPUB 没有 OPF 路径")
+        val opfBytes = read(opfPath) ?: throw UnsupportedBookException("EPUB 缺少 OPF：$opfPath")
+        val doc = parseXml(decodeXml(opfBytes))
+        val elements = doc.documentElement.descendants()
+        val title = elements.firstText("title").ifBlank { fallbackTitle }
+        val author = elements.firstText("creator")
+        val manifest = elements.filter { it.localName == "item" }.associate { item ->
+            item.attr("id") to ManifestItem(
+                href = item.attr("href"),
+                mediaType = item.attr("media-type"),
+            )
+        }
+        val spine = elements.filter { it.localName == "itemref" }.map { it.attr("idref") }
+        if (spine.isEmpty()) throw UnsupportedBookException("EPUB 目录是空的")
+        val base = opfPath.substringBeforeLast('/', "")
+        val chapters = ArrayList<NovelChapter>()
+        var htmlUsed = 0
+        var moreSpine = false
+        for (id in spine) {
+            val item = manifest[id] ?: continue
+            if (!isHtml(item)) continue
+            if (htmlUsed >= maxSpineHtml) {
+                moreSpine = true
+                break
             }
-            val spine = elements.filter { it.localName == "itemref" }.map { it.attr("idref") }
-            if (spine.isEmpty()) throw UnsupportedBookException("EPUB 目录是空的")
-            val base = opfPath.substringBeforeLast('/', "")
-            val chapters = ArrayList<NovelChapter>()
-            for (id in spine) {
-                val item = manifest[id] ?: continue
-                if (!isHtml(item)) continue
-                val href = resolveZipPath(base, item.href.substringBefore('#'))
-                val bytes = zip.readBytes(href) ?: continue
-                val chapterDir = href.substringBeforeLast('/', "")
-                val spans = ArrayList<NovelSpan>()
-                for (block in HtmlText.blocks(decodeXml(bytes))) {
-                    when (block) {
-                        is HtmlText.Block.Text -> {
-                            val plain = HtmlText.toPlain(block.html)
-                            if (plain.isNotBlank()) spans += NovelSpan.Prose(plain)
-                        }
-                        is HtmlText.Block.Image -> {
-                            if (block.href.isBlank()) continue
-                            val imagePath = resolveZipPath(chapterDir, block.href)
-                            val image = zip.readBytes(imagePath) ?: continue
-                            val payload = ImageSniff.extract(image) ?: continue
-                            spans += NovelSpan.Plate(payload)
-                        }
+            htmlUsed++
+            val href = resolveZipPath(base, item.href.substringBefore('#'))
+            val bytes = read(href) ?: continue
+            val chapterDir = href.substringBeforeLast('/', "")
+            val spans = ArrayList<NovelSpan>()
+            for (block in HtmlText.blocks(decodeXml(bytes))) {
+                when (block) {
+                    is HtmlText.Block.Text -> {
+                        val plain = HtmlText.toPlain(block.html)
+                        if (plain.isNotBlank()) spans += NovelSpan.Prose(plain)
+                    }
+                    is HtmlText.Block.Image -> {
+                        if (block.href.isBlank()) continue
+                        val imagePath = resolveZipPath(chapterDir, block.href)
+                        val image = read(imagePath) ?: continue
+                        val payload = ImageSniff.extract(image) ?: continue
+                        spans += NovelSpan.Plate(payload)
                     }
                 }
-                if (spans.isEmpty()) continue
-                val plain = spans.filterIsInstance<NovelSpan.Prose>().joinToString("\n") { it.text }
-                val heading = Regex("(?m)^(.{1,40})$").find(plain)?.value?.trim().orEmpty()
-                val chapterTitle = heading.ifBlank {
-                    if (spans.any { it is NovelSpan.Plate }) "彩页" else href.substringAfterLast('/')
-                }
-                chapters += NovelChapter(chapterTitle, plain, spans)
             }
-            if (chapters.isEmpty()) throw UnsupportedBookException("EPUB 里没有可阅读的章节")
-            return NovelContent(title, author, chapters)
+            if (spans.isEmpty()) continue
+            val plain = spans.filterIsInstance<NovelSpan.Prose>().joinToString("\n") { it.text }
+            val heading = Regex("(?m)^(.{1,40})$").find(plain)?.value?.trim().orEmpty()
+            val chapterTitle = heading.ifBlank {
+                if (spans.any { it is NovelSpan.Plate }) "彩页" else href.substringAfterLast('/')
+            }
+            chapters += NovelChapter(chapterTitle, plain, spans)
         }
+        if (chapters.isEmpty()) throw UnsupportedBookException("EPUB 里没有可阅读的章节")
+        return NovelContent(title, author, chapters, more = moreSpine)
     }
 
     private fun isHtml(item: ManifestItem): Boolean {
@@ -97,8 +111,6 @@ private fun ZipFile.readBytes(path: String): ByteArray? {
     } ?: return null
     return getInputStream(entry).use { it.readBytes() }
 }
-
-private fun ZipFile.readText(path: String): String? = readBytes(path)?.let(::decodeXml)
 
 internal fun decodeXml(bytes: ByteArray): String {
     if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {

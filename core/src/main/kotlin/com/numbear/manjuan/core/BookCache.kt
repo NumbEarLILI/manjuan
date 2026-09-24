@@ -9,7 +9,10 @@ object BookCache {
         if (!root.exists()) return 0L
         var total = 0L
         root.walkTopDown().forEach { file ->
-            if (file.isFile) total += file.length()
+            if (!file.isFile || file.name.endsWith(".allocated")) return@forEach
+            val note = File(file.parentFile, file.name + ".allocated")
+            val allocated = if (note.isFile) note.readText().trim().toLongOrNull() else null
+            total += allocated ?: file.length()
         }
         return total
     }
