@@ -299,6 +299,25 @@ class CoreLogicTest {
             client.download("/dav/b.txt", dest)
             assertEquals("demo", dest.readText())
             dest.delete()
+
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(206)
+                    .setHeader("Content-Range", "bytes 0-3/10")
+                    .setBody("abcd"),
+            )
+            val slice = client.readRange("/dav/b.txt", 0, 4)
+            assertEquals("abcd", slice.bytes.toString(Charsets.UTF_8))
+            assertEquals(10L, slice.total)
+            val range = generateSequence { server.takeRequest(1, java.util.concurrent.TimeUnit.SECONDS) }
+                .map { it.getHeader("Range") }
+                .first { it != null }
+            assertEquals("bytes=0-3", range)
+
+            server.enqueue(MockResponse().setResponseCode(200).setBody("abcdefghij"))
+            val head = client.readRange("/dav/b.txt", 0, 4)
+            assertEquals("abcd", head.bytes.toString(Charsets.UTF_8))
+            assertEquals(10L, head.total)
         } finally {
             server.shutdown()
         }

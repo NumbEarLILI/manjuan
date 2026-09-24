@@ -7,10 +7,19 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.io.InputStream
 import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
+
+data class RemoteBytes(val bytes: ByteArray, val total: Long)
+
+internal fun contentRangeTotal(header: String?): Long {
+    val total = header?.substringAfter('/', "")?.trim().orEmpty()
+    if (total.isEmpty() || total == "*") return -1L
+    return total.toLongOrNull() ?: -1L
+}
 
 class OkHttpWebDavClient(
     baseUrl: String,
@@ -108,6 +117,58 @@ class OkHttpWebDavClient(
         }
     }
 
+    /**
+     * Reads at most [length] bytes starting at [start]. A 206 response is that slice.
+     * A 200 response on the first byte is truncated to [length] and the rest of the body is cancelled.
+     */
+    fun readRange(path: String, start: Long, length: Int): RemoteBytes {
+        if (length <= 0) return RemoteBytes(ByteArray(0), -1)
+        val url = resolve(path) ?: throw UnsupportedBookException("WebDAV 地址无效")
+        val end = start + length - 1
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", authorization())
+            .header("Range", "bytes=$start-$end")
+            .get()
+            .build()
+        val call = client.newCall(request)
+        var result: RemoteBytes? = null
+        try {
+            call.execute().use { response ->
+                result = when (response.code) {
+                    401, 403 -> throw UnsupportedBookException("账号或密码不正确")
+                    206 -> {
+                        val bytes = response.body?.bytes() ?: ByteArray(0)
+                        val limited = if (bytes.size > length) bytes.copyOf(length) else bytes
+                        RemoteBytes(limited, contentRangeTotal(response.header("Content-Range")))
+                    }
+                    200 -> {
+                        if (start > 0) throw UnsupportedBookException("服务器不支持分段下载")
+                        val body = response.body ?: throw UnsupportedBookException("无法下载")
+                        val total = body.contentLength()
+                        val bytes = readAtMost(body.byteStream(), length)
+                        call.cancel()
+                        RemoteBytes(bytes, total)
+                    }
+                    416 -> RemoteBytes(ByteArray(0), contentRangeTotal(response.header("Content-Range")))
+                    else -> throw UnsupportedBookException("无法下载（HTTP ${response.code}）")
+                }
+            }
+        } catch (error: UnsupportedBookException) {
+            throw error
+        } catch (error: SocketTimeoutException) {
+            throw UnsupportedBookException("网络超时")
+        } catch (error: InterruptedIOException) {
+            if (result != null) return result
+            if (Thread.currentThread().isInterrupted) throw error
+            throw UnsupportedBookException("网络超时")
+        } catch (error: Exception) {
+            if (result != null) return result
+            throw UnsupportedBookException("无法下载")
+        }
+        return result ?: throw UnsupportedBookException("无法下载")
+    }
+
     fun peek(path: String, count: Int = 128): ByteArray {
         val url = resolve(path) ?: return ByteArray(0)
         val request = Request.Builder()
@@ -167,6 +228,19 @@ class OkHttpWebDavClient(
         } catch (_: Exception) {
             throw UnsupportedBookException(ioMessage)
         }
+    }
+
+    private fun readAtMost(input: InputStream, length: Int): ByteArray {
+        val out = ByteArray(length)
+        var offset = 0
+        while (offset < length) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedIOException("下载已取消")
+            val count = input.read(out, offset, length - offset)
+            if (count < 0) break
+            if (count == 0) throw UnsupportedBookException("无法下载")
+            offset += count
+        }
+        return if (offset == length) out else out.copyOf(offset)
     }
 
     companion object {

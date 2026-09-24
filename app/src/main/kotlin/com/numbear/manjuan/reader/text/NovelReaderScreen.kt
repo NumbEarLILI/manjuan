@@ -58,6 +58,7 @@ import com.numbear.manjuan.core.NovelContent
 import com.numbear.manjuan.core.NovelPages
 import com.numbear.manjuan.core.NovelScroll
 import com.numbear.manjuan.core.ReaderSettings
+import com.numbear.manjuan.core.RemoteText
 import com.numbear.manjuan.data.db.BookmarkEntity
 import com.numbear.manjuan.reader.common.BindReadingChrome
 import com.numbear.manjuan.reader.common.ReaderLoading
@@ -89,6 +90,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var showBookmarks by remember { mutableStateOf(false) }
     var pageCommand by remember { mutableIntStateOf(0) }
+    var loadingMore by remember { mutableStateOf(false) }
 
     LaunchedEffect(bookId) {
         loading = true
@@ -121,7 +123,31 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
         return total
     }
-    fun percent(): Float = globalOffset().toFloat() / totalChars()
+    fun percent(): Float {
+        val current = novel
+        if (current != null && current.more && current.totalBytes > 0) {
+            val loadedChars = totalChars().coerceAtLeast(1)
+            val readBytes = current.loadedBytes * globalOffset().coerceAtMost(loadedChars) / loadedChars
+            return (readBytes.toFloat() / current.totalBytes).coerceIn(0f, 0.99f)
+        }
+        return globalOffset().toFloat() / totalChars()
+    }
+
+    fun requestMore() {
+        val current = content ?: return
+        if (!current.more || loadingMore) return
+        loadingMore = true
+        scope.launch {
+            try {
+                content = app.library.extendNovel(bookId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+            } finally {
+                loadingMore = false
+            }
+        }
+    }
 
     fun persist() {
         scope.launch {
@@ -129,21 +155,45 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
     }
 
-    fun seek(targetPercent: Float) {
-        val chapters = novel?.chapters ?: return
-        val target = (targetPercent.coerceIn(0f, 1f) * totalChars()).toInt()
+    fun place(targetPercent: Float, novelNow: com.numbear.manjuan.core.NovelContent) {
+        val chaptersNow = novelNow.chapters
+        if (chaptersNow.isEmpty()) return
+        val total = chaptersNow.sumOf { it.text.length }.coerceAtLeast(1)
+        val target = (targetPercent.coerceIn(0f, 1f) * total).toInt()
         var consumed = 0
-        chapters.forEachIndexed { index, item ->
+        chaptersNow.forEachIndexed { index, item ->
             val next = consumed + item.text.length
-            if (target < next || index == chapters.lastIndex) {
+            if (target < next || index == chaptersNow.lastIndex) {
                 chapter = index
-                offset = (target - consumed).coerceAtLeast(0)
+                offset = (target - consumed).coerceIn(0, item.text.length)
                 anchor += 1
                 persist()
                 return
             }
             consumed = next
         }
+    }
+
+    fun seek(targetPercent: Float) {
+        val current = novel ?: return
+        if (current.more && current.totalBytes > 0) {
+            val targetBytes = (targetPercent.coerceIn(0f, 1f) * current.totalBytes).toLong()
+            if (targetBytes > current.loadedBytes) {
+                scope.launch {
+                    var latest = current
+                    while (latest.more && latest.loadedBytes < targetBytes) {
+                        latest = app.library.extendNovel(bookId)
+                        content = latest
+                    }
+                    place(targetBytes.toFloat() / latest.loadedBytes.coerceAtLeast(1), latest)
+                }
+                return
+            }
+            val fraction = targetBytes.toFloat() / current.loadedBytes.coerceAtLeast(1)
+            place(fraction, current)
+            return
+        }
+        place(targetPercent, current)
     }
 
     BindReadingChrome(
@@ -167,6 +217,8 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                 offset = 0
                 anchor += 1
                 persist()
+            } else if (novel?.more == true) {
+                requestMore()
             }
         },
     )
@@ -190,6 +242,10 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         onOffset = {
                             offset = it
                             persist()
+                            val current = content
+                            if (current != null && !RemoteText.covered(current.chapters, chapter, it, !current.more)) {
+                                requestMore()
+                            }
                         },
                         onChapterDelta = { delta ->
                             val next = (safeChapter + delta).coerceIn(0, novel.chapters.lastIndex)
@@ -197,6 +253,8 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                                 chapter = next
                                 offset = if (delta < 0) novel.chapters[next].text.length else 0
                                 persist()
+                            } else if (delta > 0 && novel.more) {
+                                requestMore()
                             }
                         },
                         onToggleChrome = { chrome = !chrome },
@@ -217,8 +275,19 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                                 offset = clampedOffset
                                 persist()
                             }
+                            val current = content
+                            if (current != null && !RemoteText.covered(current.chapters, clamped, clampedOffset, !current.more)) {
+                                requestMore()
+                            }
                         },
                         onToggleChrome = { chrome = !chrome },
+                    )
+                }
+                if (loadingMore) {
+                    Text(
+                        "正在加载后续内容…",
+                        modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp),
+                        color = colors.foreground,
                     )
                 }
                 if (chrome) {
