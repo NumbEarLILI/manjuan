@@ -76,7 +76,15 @@ fun BindReadingChrome(settings: ReaderSettings, onPrev: () -> Unit, onNext: () -
 fun ReaderLoading(download: CacheProgress?, onCancel: () -> Unit, color: Color, modifier: Modifier = Modifier) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier.padding(24.dp)) {
         CircularProgressIndicator(color = color)
-        Text(if (download == null) "正在打开…" else "正在下载…", color = color, modifier = Modifier.padding(top = 16.dp))
+        Text(
+            when {
+                download == null -> "正在打开…"
+                download.total > 0 -> "正在下载…"
+                else -> "正在加载一部分…"
+            },
+            color = color,
+            modifier = Modifier.padding(top = 16.dp),
+        )
         if (download != null && download.total > 0) {
             LinearProgressIndicator(
                 progress = { (download.read.toFloat() / download.total).coerceIn(0f, 1f) },

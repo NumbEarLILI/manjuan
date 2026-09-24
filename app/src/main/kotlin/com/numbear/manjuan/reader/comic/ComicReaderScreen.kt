@@ -85,6 +85,8 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     var chrome by remember { mutableStateOf(true) }
     var showMarks by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var catchingUp by remember { mutableStateOf(false) }
+    var catchPage by remember { mutableIntStateOf(0) }
     val scheme = MaterialTheme.colorScheme
 
     LaunchedEffect(bookId) {
@@ -92,7 +94,17 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
         download = null
         try {
             content = app.library.openPaged(bookId) { read, total -> download = CacheProgress(read, total) }
-            page = LocatorCodec.pageIndex(app.library.progress(bookId)?.locator.orEmpty())
+            val saved = LocatorCodec.pageIndex(app.library.progress(bookId)?.locator.orEmpty())
+            val opened = content
+            val loaded = opened?.pages?.size ?: 0
+            if (opened != null && opened.remotePageCount > loaded && saved >= loaded) {
+                catchPage = saved
+                page = 0
+                catchingUp = true
+            } else {
+                page = saved
+                catchingUp = false
+            }
             bookmarks = app.library.bookmarks(bookId)
             error = null
         } catch (cancelled: CancellationException) {
@@ -104,6 +116,24 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
     }
 
+    LaunchedEffect(bookId, catchingUp) {
+        if (!catchingUp) return@LaunchedEffect
+        val target = catchPage
+        try {
+            var latest = content ?: return@LaunchedEffect
+            while (latest.remotePageCount > latest.pages.size && target >= latest.pages.size) {
+                latest = app.library.extendPaged(bookId, (latest.pages.size - 1).coerceAtLeast(0))
+                content = latest
+            }
+            page = target.coerceAtMost(((content?.pages?.size ?: 1) - 1).coerceAtLeast(0))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+        } finally {
+            catchingUp = false
+        }
+    }
+
     val book = content
     val count = when {
         book == null -> 0
@@ -112,9 +142,12 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     }
 
     fun persist(index: Int) {
+        if (catchingUp) return
         page = index
         scope.launch {
-            val percent = if (count <= 1) 1f else index.toFloat() / (count - 1).coerceAtLeast(1)
+            val remote = content?.remotePageCount ?: 0
+            val total = if (remote > count) remote else count
+            val percent = if (total <= 1) 1f else index.toFloat() / (total - 1).coerceAtLeast(1)
             app.library.saveProgress(bookId, LocatorCodec.page(index), percent)
         }
     }

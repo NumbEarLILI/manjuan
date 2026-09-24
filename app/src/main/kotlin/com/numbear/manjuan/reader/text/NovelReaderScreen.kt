@@ -91,6 +91,9 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     var showBookmarks by remember { mutableStateOf(false) }
     var pageCommand by remember { mutableIntStateOf(0) }
     var loadingMore by remember { mutableStateOf(false) }
+    var catchingUp by remember { mutableStateOf(false) }
+    var catchChapter by remember { mutableIntStateOf(0) }
+    var catchOffset by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(bookId) {
         loading = true
@@ -98,9 +101,22 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
         try {
             content = app.library.openNovel(bookId) { read, total -> download = CacheProgress(read, total) }
             val saved = app.library.progress(bookId)
-            chapter = LocatorCodec.chapter(saved?.locator.orEmpty())
-            offset = LocatorCodec.offset(saved?.locator.orEmpty())
+            val savedChapter = LocatorCodec.chapter(saved?.locator.orEmpty())
+            val savedOffset = LocatorCodec.offset(saved?.locator.orEmpty())
             bookmarks = app.library.bookmarks(bookId)
+            val opened = content
+            val reached = opened == null || RemoteText.covered(opened.chapters, savedChapter, savedOffset, !opened.more)
+            if (reached) {
+                chapter = savedChapter
+                offset = savedOffset
+                catchingUp = false
+            } else {
+                chapter = 0
+                offset = 0
+                catchChapter = savedChapter
+                catchOffset = savedOffset
+                catchingUp = true
+            }
             error = null
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -108,6 +124,31 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
             error = failure.message ?: "无法打开"
         } finally {
             loading = false
+        }
+    }
+
+    LaunchedEffect(bookId, catchingUp) {
+        if (!catchingUp) return@LaunchedEffect
+        val targetChapter = catchChapter
+        val targetOffset = catchOffset
+        try {
+            var latest = content ?: return@LaunchedEffect
+            while (latest.more && !RemoteText.covered(latest.chapters, targetChapter, targetOffset, complete = false)) {
+                loadingMore = true
+                latest = app.library.extendNovel(bookId)
+                content = latest
+            }
+            if (targetChapter <= latest.chapters.lastIndex) {
+                chapter = targetChapter
+                offset = targetOffset.coerceIn(0, latest.chapters[targetChapter].text.length)
+                anchor += 1
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+        } finally {
+            loadingMore = false
+            catchingUp = false
         }
     }
 
@@ -150,6 +191,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     }
 
     fun persist() {
+        if (catchingUp) return
         scope.launch {
             app.library.saveProgress(bookId, LocatorCodec.novel(chapter, offset), percent())
         }
@@ -175,6 +217,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
     }
 
     fun seek(targetPercent: Float) {
+        catchingUp = false
         val current = novel ?: return
         if (current.more && current.totalBytes > 0) {
             val targetBytes = (targetPercent.coerceIn(0f, 1f) * current.totalBytes).toLong()
@@ -240,6 +283,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         settings = settings,
                         pageCommand = pageCommand,
                         onOffset = {
+                            if (catchingUp) return@PageTurn
                             offset = it
                             persist()
                             val current = content
@@ -267,6 +311,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         anchor = anchor,
                         settings = settings,
                         onPlace = { nextChapter, nextOffset ->
+                            if (catchingUp) return@ScrollChapter
                             val clamped = nextChapter.coerceIn(0, novel.chapters.lastIndex)
                             val textLength = novel.chapters[clamped].text.length
                             val clampedOffset = nextOffset.coerceIn(0, textLength)
@@ -283,9 +328,9 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                         onToggleChrome = { chrome = !chrome },
                     )
                 }
-                if (loadingMore) {
+                if (loadingMore || catchingUp) {
                     Text(
-                        "正在加载后续内容…",
+                        if (catchingUp) "正在加载到上次阅读的位置…" else "正在加载后续内容…",
                         modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp),
                         color = colors.foreground,
                     )

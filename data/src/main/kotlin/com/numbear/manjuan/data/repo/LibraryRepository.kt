@@ -543,8 +543,7 @@ class LibraryRepository(
                 BookFormat.IMAGE_FOLDER -> {
                     val source = database.sources().get(book.sourceId)
                     if (source?.type == WEBDAV && !cacheReady(book)) {
-                        val saved = LocatorCodec.pageIndex(database.progress().get(book.id)?.locator.orEmpty())
-                        return@withContext openRemoteImages(book, saved, onProgress).also {
+                        return@withContext openRemoteImages(book, page = 0, onProgress).also {
                             database.books().update((database.books().get(book.id) ?: book).copy(lastOpenedAt = System.currentTimeMillis()))
                         }
                     }
@@ -914,15 +913,19 @@ class LibraryRepository(
 
     private suspend fun remoteText(book: BookEntity, chapter: Int, offset: Int, onProgress: (Long, Long) -> Unit): NovelContent {
         return remoteGate(book.id).withLock {
-            var content = appendText(book, onProgress)
-            var guard = 0
-            while (content.more && !RemoteText.covered(content.chapters, chapter, offset, complete = false) && guard < 4_000) {
-                guard++
-                val fresh = database.books().get(book.id) ?: book
-                content = appendText(fresh, onProgress)
+            val existing = readStream(book)
+            if (existing != null && (!existing.more || RemoteText.covered(existing.chapters, chapter, offset, complete = false))) {
+                return@withLock existing
             }
-            content
+            appendText(book, onProgress)
         }
+    }
+
+    private fun readStream(book: BookEntity): NovelContent? {
+        val file = streamFile(book.id)
+        if (!file.isFile || file.length() == 0L) return null
+        val known = book.sizeBytes
+        return RemoteText.novel(book.title, book.author, file.readBytes(), if (known > 0) known else -1L)
     }
 
     private suspend fun appendText(book: BookEntity, onProgress: (Long, Long) -> Unit): NovelContent {
@@ -939,7 +942,7 @@ class LibraryRepository(
         val part = blockingWebDav {
             remote.readRange(book.remotePath.ifBlank { book.location }, loaded, RemoteText.CHUNK_BYTES)
         }
-        onProgress(loaded, if (part.total > 0) part.total else known)
+        onProgress(loaded, -1L)
         if (part.bytes.isEmpty()) {
             val total = if (part.total >= 0) part.total else loaded
             val current = database.books().get(book.id) ?: book
@@ -957,8 +960,8 @@ class LibraryRepository(
         }
         val current = database.books().get(book.id) ?: book
         database.books().update(current.copy(sizeBytes = if (total > 0) total else current.sizeBytes))
-        onProgress(combinedSize, if (total > 0) total else -1L)
         val done = total >= 0 && combinedSize >= total
+        onProgress(combinedSize, if (done) combinedSize else -1L)
         if (done) finalizeText(database.books().get(book.id) ?: current, file)
         return RemoteText.novel(book.title, book.author, file.readBytes(), if (done) combinedSize else total)
     }
@@ -986,7 +989,7 @@ class LibraryRepository(
                     blockingWebDav { remote.download(child.path, dest, onProgress) }
                 }
                 have++
-                onProgress(have.toLong(), images.size.toLong())
+                onProgress(have.toLong(), target.toLong())
             }
             val complete = have >= images.size
             val marker = File(dir, PARTIAL_MARK)
