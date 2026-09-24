@@ -1,5 +1,6 @@
 package com.numbear.manjuan.reader.comic
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.Image
@@ -35,8 +36,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -47,7 +48,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.numbear.manjuan.ManjuanApp
 import com.numbear.manjuan.cache.CacheProgress
@@ -95,7 +98,13 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
     var catchingUp by remember { mutableStateOf(false) }
     var catchPage by remember { mutableIntStateOf(0) }
     var loadingMore by remember { mutableStateOf(false) }
+    // Kept for the whole visit so a later segment does not throw away a page that is already on screen.
+    val pageBitmaps = remember(bookId) { mutableStateMapOf<String, Bitmap>() }
+    val pageRatios = remember(bookId) { mutableStateMapOf<String, Float>() }
+    var picturesReady by remember(bookId) { mutableStateOf(false) }
     val colors = settings.inkColors()
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
 
     LaunchedEffect(bookId) {
         loading = true
@@ -142,6 +151,53 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
         }
     }
 
+    // Stay on the opening spinner until the saved page (and enough of the next ones to fill
+    // the screen) has a real height. Showing full-screen placeholders first makes the list
+    // jump each time a picture arrives, and again when the next segment replaces the book.
+    LaunchedEffect(bookId) {
+        val widthPx = with(density) { configuration.screenWidthDp.dp.toPx() }.coerceAtLeast(1f)
+        val heightPx = with(density) { configuration.screenHeightDp.dp.toPx() }.coerceAtLeast(1f)
+        var toppedUp = false
+        snapshotFlow {
+            OpeningFrame(
+                content = content,
+                page = page,
+                catchingUp = catchingUp,
+                loading = loading,
+                vertical = settings.comicDirection == "VERTICAL",
+                dual = settings.dualPage && configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
+            )
+        }.collect { frame ->
+            if (picturesReady || frame.loading || frame.catchingUp) return@collect
+            var latest = frame.content ?: return@collect
+            var total = pagedCount(latest)
+            // The saved page can sit on the last pages of this segment. Pull the next
+            // segment in before the list is shown, so it does not resize once it appears.
+            if (!toppedUp && latest.remotePageCount > total && total > 0 && frame.page >= total - 2) {
+                toppedUp = true
+                try {
+                    latest = app.library.extendPaged(bookId, frame.page)
+                    content = latest
+                    total = pagedCount(latest)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                }
+            }
+            if (total <= 0) {
+                picturesReady = true
+                return@collect
+            }
+            try {
+                warmOpening(app, context, bookId, latest, frame.page, frame.vertical, frame.dual, widthPx, heightPx, pageBitmaps, pageRatios)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+            }
+            picturesReady = true
+        }
+    }
+
     val book = content
     val count = when {
         book == null -> 0
@@ -162,7 +218,8 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(colors.background)) {
         when {
-            loading -> ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
+            loading || catchingUp || (content != null && !picturesReady) ->
+                ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 Text(error!!, color = colors.foreground)
                 TextButton(onClick = onBack) { Text("返回书架") }
@@ -221,7 +278,11 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                         if (settings.comicDirection == "VERTICAL") {
                             val listState = rememberLazyListState(initialFirstVisibleItemIndex = safePage)
                             LaunchedEffect(listState) {
-                                snapshotFlow { listState.firstVisibleItemIndex }.collect { persist(it) }
+                                snapshotFlow {
+                                    listState.firstVisibleItemIndex to listState.layoutInfo.visibleItemsInfo.isNotEmpty()
+                                }.collect { (index, visible) ->
+                                    if (visible) persist(index)
+                                }
                             }
                             BindReadingChrome(
                                 settings,
@@ -234,22 +295,25 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                                     detectReaderTap { chrome = !chrome }
                                 },
                             ) {
-                                items(count) { index ->
+                                items(count = count, key = { pageKey(book, it) }) { index ->
                                     // A zero-height placeholder makes the list compose every page and
-                                    // download them. Keep an unloaded page one screen tall.
-                                    var ready by remember(book, index) { mutableStateOf(false) }
+                                    // download them. An unloaded page stays one screen tall. A page whose
+                                    // picture is already decoded uses that picture's ratio, so the list
+                                    // does not resize when the bitmap is attached.
+                                    val ratio = pageRatios[pageKey(book, index)]
                                     PageBitmap(
                                         app,
                                         bookId,
                                         book,
                                         index,
-                                        modifier = if (ready) {
-                                            Modifier.fillParentMaxWidth()
-                                        } else {
+                                        pageBitmaps,
+                                        pageRatios,
+                                        modifier = if (ratio == null) {
                                             Modifier.fillParentMaxWidth().fillParentMaxHeight()
+                                        } else {
+                                            Modifier.fillParentMaxWidth().aspectRatio(ratio)
                                         },
                                     ) { bitmap ->
-                                        SideEffect { ready = true }
                                         ZoomImage(bitmap, settings.fitMode, vertical = true)
                                     }
                                 }
@@ -274,15 +338,17 @@ fun PagedReaderScreen(bookId: Long, onBack: () -> Unit) {
                                     reverseLayout = settings.comicDirection == "RTL",
                                 ) { slot ->
                                     if (!dual) {
-                                        PageBitmap(app, bookId, book, slot) { bitmap -> ZoomImage(bitmap, settings.fitMode, vertical = false) }
+                                        PageBitmap(app, bookId, book, slot, pageBitmaps, pageRatios) { bitmap ->
+                                            ZoomImage(bitmap, settings.fitMode, vertical = false)
+                                        }
                                     } else {
                                         androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
                                             val left = slot * 2
-                                            PageBitmap(app, bookId, book, left, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                            PageBitmap(app, bookId, book, left, pageBitmaps, pageRatios, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
                                                 ZoomImage(bitmap, "PAGE", vertical = false)
                                             }
                                             if (left + 1 < count) {
-                                                PageBitmap(app, bookId, book, left + 1, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
+                                                PageBitmap(app, bookId, book, left + 1, pageBitmaps, pageRatios, Modifier.weight(1f).fillMaxHeight()) { bitmap ->
                                                     ZoomImage(bitmap, "PAGE", vertical = false)
                                                 }
                                             }
@@ -384,28 +450,31 @@ private fun PageBitmap(
     bookId: Long,
     content: PagedContent,
     index: Int,
+    decoded: MutableMap<String, Bitmap>,
+    ratios: MutableMap<String, Float>,
     modifier: Modifier = Modifier.fillMaxWidth(),
     image: @Composable (Bitmap) -> Unit,
 ) {
     val context = LocalContext.current
-    var bitmap by remember(content, index) { mutableStateOf<Bitmap?>(null) }
-    var failed by remember(content, index) { mutableStateOf<String?>(null) }
-    LaunchedEffect(content, index) {
-        try {
-            bitmap = withContext(Dispatchers.IO) {
-                val pdf = content.pdfFile
-                if (pdf != null) {
-                    app.library.ensureRemotePage(bookId, index)
-                    BitmapIO.renderPdf(pdf, index, 1600)
-                } else {
-                    when (val page = content.pages[index]) {
-                        is PageRef.FilePage -> BitmapIO.decodeFile(File(page.path), 1600)
-                        is PageRef.UriPage -> BitmapIO.decodeUri(context, Uri.parse(page.uri), 1600)
-                    }
-                }
+    val key = pageKey(content, index)
+    // Keyed by the file, not the book object. Extending the download replaces the book
+    // but the pages already on screen keep their bitmap and their height.
+    var bitmap by remember(key) { mutableStateOf(decoded[key]) }
+    var failed by remember(key) { mutableStateOf<String?>(null) }
+    LaunchedEffect(key) {
+        val existing = bitmap
+        if (existing != null) {
+            ratios[key] = bitmapRatio(existing)
+        } else {
+            try {
+                val loaded = decodePage(app, context, bookId, content, index)
+                ratios[key] = bitmapRatio(loaded)
+                bitmap = loaded
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                failed = error.message
             }
-        } catch (error: Exception) {
-            failed = error.message
         }
     }
     Box(modifier, contentAlignment = Alignment.Center) {
@@ -413,6 +482,103 @@ private fun PageBitmap(
             bitmap != null -> image(bitmap!!)
             failed != null -> Text(failed!!, color = MaterialTheme.colorScheme.onBackground, modifier = Modifier.padding(16.dp))
             else -> CircularProgressIndicator()
+        }
+    }
+}
+
+private data class OpeningFrame(
+    val content: PagedContent?,
+    val page: Int,
+    val catchingUp: Boolean,
+    val loading: Boolean,
+    val vertical: Boolean,
+    val dual: Boolean,
+)
+
+private fun pagedCount(content: PagedContent): Int =
+    if (content.pdfPageCount > 0) content.pdfPageCount else content.pages.size
+
+private fun pageKey(content: PagedContent, index: Int): String {
+    val pdf = content.pdfFile
+    if (pdf != null) return "pdf:${pdf.absolutePath}:$index"
+    return when (val page = content.pages.getOrNull(index)) {
+        is PageRef.FilePage -> page.path
+        is PageRef.UriPage -> page.uri
+        null -> "missing:$index"
+    }
+}
+
+private fun bitmapRatio(bitmap: Bitmap): Float =
+    bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+
+private suspend fun decodePage(
+    app: ManjuanApp,
+    context: android.content.Context,
+    bookId: Long,
+    content: PagedContent,
+    index: Int,
+): Bitmap = withContext(Dispatchers.IO) {
+    val pdf = content.pdfFile
+    if (pdf != null) {
+        app.library.ensureRemotePage(bookId, index)
+        BitmapIO.renderPdf(pdf, index, 1600)
+    } else {
+        when (val page = content.pages[index]) {
+            is PageRef.FilePage -> BitmapIO.decodeFile(File(page.path), 1600)
+            is PageRef.UriPage -> BitmapIO.decodeUri(context, Uri.parse(page.uri), 1600)
+        }
+    }
+}
+
+/**
+ * Decode the page being opened, then enough following pages that the first screen is
+ * already the right height. One extra page keeps the next placeholder below the fold.
+ */
+private suspend fun warmOpening(
+    app: ManjuanApp,
+    context: android.content.Context,
+    bookId: Long,
+    content: PagedContent,
+    page: Int,
+    vertical: Boolean,
+    dual: Boolean,
+    widthPx: Float,
+    heightPx: Float,
+    decoded: MutableMap<String, Bitmap>,
+    ratios: MutableMap<String, Float>,
+) {
+    val total = pagedCount(content)
+    if (total <= 0) return
+    val first = page.coerceIn(0, total - 1)
+    suspend fun load(index: Int) {
+        val key = pageKey(content, index)
+        val existing = decoded[key]
+        if (existing != null) {
+            ratios[key] = bitmapRatio(existing)
+            return
+        }
+        val bitmap = decodePage(app, context, bookId, content, index)
+        decoded[key] = bitmap
+        ratios[key] = bitmapRatio(bitmap)
+    }
+    if (!vertical) {
+        load(first)
+        if (dual && first + 1 < total) load(first + 1)
+        return
+    }
+    var filled = 0f
+    var index = first
+    var extra = false
+    var guard = 0
+    while (index < total && guard < 6) {
+        load(index)
+        val ratio = ratios[pageKey(content, index)] ?: 1f
+        filled += widthPx / ratio.coerceAtLeast(0.05f)
+        index++
+        guard++
+        if (filled >= heightPx) {
+            if (extra) break
+            extra = true
         }
     }
 }

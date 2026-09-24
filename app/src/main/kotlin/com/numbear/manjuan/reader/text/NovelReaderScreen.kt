@@ -274,7 +274,8 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(colors.background)) {
         when {
-            loading -> ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
+            // Catching up used to paint chapter 1, then jump once each new segment arrived.
+            loading || catchingUp -> ReaderLoading(download, onBack, colors.foreground, Modifier.align(Alignment.Center).fillMaxWidth())
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 Text(error!!, color = colors.foreground)
                 TextButton(onClick = onBack) { Text("返回书架") }
@@ -314,6 +315,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
                 if (settings.pageMode) {
                     PageTurn(
                         chapter = current,
+                        chapterIndex = safeChapter,
                         offset = offset.coerceIn(0, current.text.length),
                         settings = settings,
                         pageCommand = pageCommand,
@@ -433,6 +435,7 @@ fun NovelReaderScreen(bookId: Long, onBack: () -> Unit) {
 @Composable
 private fun PageTurn(
     chapter: NovelChapter,
+    chapterIndex: Int,
     offset: Int,
     settings: ReaderSettings,
     pageCommand: Int,
@@ -451,61 +454,63 @@ private fun PageTurn(
         // room for its descent. Overestimating either one clips a line off the page.
         val charsPerLine = (widthPx / (fontPx * 1.12f)).toInt().coerceAtLeast(6)
         val lines = ((heightPx / (fontPx * settings.lineSpacing)).toInt() - 1).coerceAtLeast(3)
-        val pages = remember(chapter, charsPerLine, lines) { NovelPages.pages(chapter, charsPerLine, lines) }
-        if (pages.isEmpty()) {
-            Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
-            return@BoxWithConstraints
-        }
-        val initial = pages.indexOfLast { it.start <= offset }.let { if (it < 0) 0 else it }
-        key(chapter, charsPerLine, lines) {
-            val pager = rememberPagerState(initialPage = initial, pageCount = { pages.size })
-            LaunchedEffect(pager.currentPage) {
-                onOffset(pages[pager.currentPage].start)
-            }
-            val scope = rememberCoroutineScope()
-            var seenCommand by remember { mutableIntStateOf(pageCommand) }
-            LaunchedEffect(pageCommand) {
-                val delta = pageCommand - seenCommand
-                seenCommand = pageCommand
-                if (delta == 0) return@LaunchedEffect
-                val target = (pager.currentPage + delta).coerceIn(0, pages.lastIndex)
-                if (target == pager.currentPage && delta < 0) onChapterDelta(-1)
-                else if (target == pager.currentPage && delta > 0) onChapterDelta(1)
-                else pager.animateScrollToPage(target)
-            }
-            HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
-                when (val item = pages[page]) {
-                    is NovelPages.Page.Words -> Text(
-                        item.text,
-                        modifier = Modifier.fillMaxSize().padding(margin),
-                        style = TextStyle(
-                            color = colors.foreground,
-                            fontSize = settings.fontSizeSp.sp,
-                            lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
-                            fontFamily = FontFamily.Serif,
-                        ),
-                    )
-                    is NovelPages.Page.Picture -> PlateImage(item.bytes, colors.foreground, Modifier.fillMaxSize().padding(margin))
+        // The chapter index and the measured page size own the pager. Appending the unread
+        // tail must not rebuild it, or the page that is already open blinks and jumps.
+        key(chapterIndex, charsPerLine, lines) {
+            val pages = remember(chapter.text, charsPerLine, lines) { NovelPages.pages(chapter, charsPerLine, lines) }
+            if (pages.isEmpty()) {
+                Text("这一章是空的", modifier = Modifier.padding(margin), color = colors.foreground)
+            } else {
+                val initial = pages.indexOfLast { it.start <= offset }.let { if (it < 0) 0 else it }
+                val pager = rememberPagerState(initialPage = initial, pageCount = { pages.size })
+                LaunchedEffect(pager.currentPage) {
+                    onOffset(pages[pager.currentPage].start)
                 }
-            }
-            Box(
-                Modifier.fillMaxSize().pointerInput(pager.currentPage, pages.size) {
-                    detectTapGestures { tap ->
-                        val zone = tap.x / size.width
-                        when {
-                            zone < 0.28f -> {
-                                if (pager.currentPage == 0) onChapterDelta(-1)
-                                else scope.launch { pager.animateScrollToPage(pager.currentPage - 1) }
-                            }
-                            zone > 0.72f -> {
-                                if (pager.currentPage >= pages.lastIndex) onChapterDelta(1)
-                                else scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
-                            }
-                            else -> onToggleChrome()
-                        }
+                val scope = rememberCoroutineScope()
+                var seenCommand by remember { mutableIntStateOf(pageCommand) }
+                LaunchedEffect(pageCommand) {
+                    val delta = pageCommand - seenCommand
+                    seenCommand = pageCommand
+                    if (delta == 0) return@LaunchedEffect
+                    val target = (pager.currentPage + delta).coerceIn(0, pages.lastIndex)
+                    if (target == pager.currentPage && delta < 0) onChapterDelta(-1)
+                    else if (target == pager.currentPage && delta > 0) onChapterDelta(1)
+                    else pager.animateScrollToPage(target)
+                }
+                HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+                    when (val item = pages[page]) {
+                        is NovelPages.Page.Words -> Text(
+                            item.text,
+                            modifier = Modifier.fillMaxSize().padding(margin),
+                            style = TextStyle(
+                                color = colors.foreground,
+                                fontSize = settings.fontSizeSp.sp,
+                                lineHeight = (settings.fontSizeSp * settings.lineSpacing).sp,
+                                fontFamily = FontFamily.Serif,
+                            ),
+                        )
+                        is NovelPages.Page.Picture -> PlateImage(item.bytes, colors.foreground, Modifier.fillMaxSize().padding(margin))
                     }
-                },
-            )
+                }
+                Box(
+                    Modifier.fillMaxSize().pointerInput(pager.currentPage, pages.size) {
+                        detectTapGestures { tap ->
+                            val zone = tap.x / size.width
+                            when {
+                                zone < 0.28f -> {
+                                    if (pager.currentPage == 0) onChapterDelta(-1)
+                                    else scope.launch { pager.animateScrollToPage(pager.currentPage - 1) }
+                                }
+                                zone > 0.72f -> {
+                                    if (pager.currentPage >= pages.lastIndex) onChapterDelta(1)
+                                    else scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
+                                }
+                                else -> onToggleChrome()
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
 }
@@ -537,25 +542,34 @@ private fun ScrollChapter(
             NovelScroll.maxChars(charsPerLine, lineHeightPx)
         }
         val entries = remember(chapters, maxChars) { NovelScroll.document(chapters, maxChars) }
-        val listState = rememberLazyListState()
+        val openedAt = if (entries.isEmpty()) {
+            0
+        } else {
+            NovelScroll.indexAt(entries, chapterIndex, offset).coerceIn(0, entries.lastIndex)
+        }
+        // Start on the saved block. Scrolling there after the first frame flashes the top of the book.
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = openedAt)
         var settling by remember { mutableStateOf(true) }
-        LaunchedEffect(anchor, entries) {
+        LaunchedEffect(anchor) {
             settling = true
             try {
-                if (entries.isEmpty()) return@LaunchedEffect
-                val index = NovelScroll.indexAt(entries, chapterIndex, offset).coerceIn(0, entries.lastIndex)
-                listState.scrollToItem(index)
-                val body = entries[index] as? NovelScroll.Entry.Body
-                val words = body?.block as? NovelScroll.Block.Words
-                if (words != null && words.text.isNotEmpty() && offset > words.start) {
-                    val size = withTimeoutOrNull(500) {
-                        snapshotFlow {
-                            listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
-                        }.first { it > 0 }
-                    } ?: 0
-                    if (size > 0) {
-                        val fraction = (offset - words.start).coerceIn(0, words.text.length).toFloat() / words.text.length
-                        listState.scrollToItem(index, (fraction * size).toInt().coerceAtLeast(0))
+                if (entries.isNotEmpty()) {
+                    val index = NovelScroll.indexAt(entries, chapterIndex, offset).coerceIn(0, entries.lastIndex)
+                    if (listState.firstVisibleItemIndex != index || listState.firstVisibleItemScrollOffset != 0) {
+                        listState.scrollToItem(index)
+                    }
+                    val body = entries[index] as? NovelScroll.Entry.Body
+                    val words = body?.block as? NovelScroll.Block.Words
+                    if (words != null && words.text.isNotEmpty() && offset > words.start) {
+                        val size = withTimeoutOrNull(500) {
+                            snapshotFlow {
+                                listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+                            }.first { it > 0 }
+                        } ?: 0
+                        if (size > 0) {
+                            val fraction = (offset - words.start).coerceIn(0, words.text.length).toFloat() / words.text.length
+                            listState.scrollToItem(index, (fraction * size).toInt().coerceAtLeast(0))
+                        }
                     }
                 }
             } finally {
